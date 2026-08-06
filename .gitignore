@@ -6,3 +6,4 @@ __pycache__/
 data/cache/
 *.joblib
 report/output/
+logs/automation/
