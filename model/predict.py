@@ -14,8 +14,10 @@ import os
 import joblib
 import nfl_data_py as nfl
 import pandas as pd
+import requests
 
 from config import CURRENT_SEASON
+from data.fetch_injuries import fetch_current_injury_impact
 from data.fetch_week import fetch_week
 from data.team_stats import build_rolling_team_stats, build_team_game_stats
 from model.train import FEATURE_COLS, STAT_COLS
@@ -67,7 +69,7 @@ def get_pregame_stats(season: int, week: int) -> pd.DataFrame:
     return combined.set_index("team")
 
 
-def _build_features(game: pd.Series, stats: pd.DataFrame) -> dict | None:
+def _build_features(game: pd.Series, stats: pd.DataFrame, injury_impact: dict) -> dict | None:
     home, away = game["home_team"], game["away_team"]
     if home not in stats.index or away not in stats.index:
         return None
@@ -76,6 +78,9 @@ def _build_features(game: pd.Series, stats: pd.DataFrame) -> dict | None:
     feat = {f"{col}_diff": h[col] - a[col] for col in STAT_COLS}
     feat["home_field_context_diff"] = h["home_point_diff_avg"] - a["away_point_diff_avg"]
     feat["rest_diff"] = game["home_rest"] - game["away_rest"]
+    # A team with no key absent from the live injury feed just had nothing
+    # worth listing -- 0 impact, not missing data.
+    feat["injury_impact_diff"] = injury_impact.get(home, 0.0) - injury_impact.get(away, 0.0)
     return feat
 
 
@@ -233,6 +238,12 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     games = fetch_week(week, season)
     stats = get_pregame_stats(season, week)
 
+    try:
+        injury_impact = fetch_current_injury_impact()
+    except requests.RequestException as e:
+        print(f"Warning: couldn't fetch live injury data ({e}); scoring without it.")
+        injury_impact = {}
+
     current_counts, current_games, current_def_rates = _current_season_td_data(season, week)
     fallback_counts, fallback_games, fallback_def_rates = _fallback_td_data(season)
     current_td_data = (current_counts, current_games)
@@ -248,7 +259,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
 
     rows = []
     for _, game in games.iterrows():
-        feat = _build_features(game, stats)
+        feat = _build_features(game, stats, injury_impact)
         row = game.to_dict()
         row["home_td_scorer"] = get_td_scorer_prediction(
             game["home_team"], game["away_team"], current_td_data, fallback_td_data,
@@ -258,8 +269,10 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             def_rates, league_avg_def_rate, implied_totals, league_avg_implied_total)
         if game["home_team"] in stats.index:
             row["home_stats"] = stats.loc[game["home_team"]].to_dict()
+            row["home_stats"]["injury_impact"] = injury_impact.get(game["home_team"], 0.0)
         if game["away_team"] in stats.index:
             row["away_stats"] = stats.loc[game["away_team"]].to_dict()
+            row["away_stats"]["injury_impact"] = injury_impact.get(game["away_team"], 0.0)
         if feat is None:
             row["home_win_prob"] = None
             row["implied_spread"] = None

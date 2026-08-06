@@ -15,6 +15,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from config import HISTORICAL_SEASONS
+from data.fetch_injuries import historical_injury_impact
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(ROOT_DIR, "data", "cache")
@@ -36,11 +37,13 @@ STAT_COLS = [
     "ats_win_pct_season", "ats_win_pct_last5",
 ]
 FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
-    "home_field_context_diff", "rest_diff",
+    "home_field_context_diff", "rest_diff", "injury_impact_diff",
 ]
 
 
-def build_feature_frame(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> pd.DataFrame:
+def build_feature_frame(
+    schedules: pd.DataFrame, team_stats: pd.DataFrame, injuries: pd.DataFrame,
+) -> pd.DataFrame:
     """One row per game: home-minus-away rolling stat diffs + home_win label."""
     reg = schedules[
         (schedules["game_type"] == "REG") & schedules["home_score"].notna()
@@ -67,6 +70,20 @@ def build_feature_frame(schedules: pd.DataFrame, team_stats: pd.DataFrame) -> pd
     )
     games["rest_diff"] = games["rest_days_home"] - games["rest_days_away"]
 
+    # Left merge + fillna(0): a team with no rows in `injuries` that week
+    # simply had nothing worth listing, i.e. zero injury impact -- not
+    # missing data.
+    games = games.merge(
+        injuries.rename(columns={"team": "home_team", "injury_impact": "home_injury_impact"}),
+        on=["season", "week", "home_team"], how="left",
+    ).merge(
+        injuries.rename(columns={"team": "away_team", "injury_impact": "away_injury_impact"}),
+        on=["season", "week", "away_team"], how="left",
+    )
+    games["home_injury_impact"] = games["home_injury_impact"].fillna(0.0)
+    games["away_injury_impact"] = games["away_injury_impact"].fillna(0.0)
+    games["injury_impact_diff"] = games["home_injury_impact"] - games["away_injury_impact"]
+
     games["home_win"] = (games["home_score"] > games["away_score"]).astype(int)
 
     return games.dropna(subset=FEATURE_COLS)
@@ -90,8 +107,10 @@ def train_spread_calibration(train_df: pd.DataFrame, model) -> LinearRegression:
 def main():
     schedules = pd.read_parquet(SCHEDULES_PATH)
     team_stats = pd.read_parquet(TEAM_STATS_PATH)
+    print("Pulling historical injury reports...")
+    injuries = historical_injury_impact(HISTORICAL_SEASONS)
 
-    games = build_feature_frame(schedules, team_stats)
+    games = build_feature_frame(schedules, team_stats, injuries)
     train_df = games[games["season"].isin(TRAIN_SEASONS)]
     test_df = games[games["season"] == TEST_SEASON]
     print(f"Train: {len(train_df)} games ({TRAIN_SEASONS[0]}-{TRAIN_SEASONS[-1]})")
