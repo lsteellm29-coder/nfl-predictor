@@ -51,6 +51,14 @@ def build_position_tables(pbp: pd.DataFrame, pos_map: dict) -> dict:
         "rush_def_n": rush_plays.groupby("defteam").size(),
         "rush_off_epa": rush_plays.groupby("posteam")["epa"].mean(),
         "rush_off_n": rush_plays.groupby("posteam").size(),
+        # Yards/target and yards/carry allowed, by position -- same shape
+        # as the EPA tables above but in raw yardage terms, since Phase 2's
+        # prop projections need an actual yardage matchup multiplier, not
+        # an abstract EPA one.
+        "defense_ypt": pass_plays.groupby(["defteam", "recv_pos"])["receiving_yards"].mean().unstack(),
+        "offense_ypt": pass_plays.groupby(["posteam", "recv_pos"])["receiving_yards"].mean().unstack(),
+        "rush_def_ypc": rush_plays.groupby("defteam")["rushing_yards"].mean(),
+        "rush_off_ypc": rush_plays.groupby("posteam")["rushing_yards"].mean(),
     }
 
 

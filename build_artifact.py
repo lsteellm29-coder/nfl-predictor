@@ -17,9 +17,11 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT_DIR)
 
 from config import CURRENT_SEASON
+from model.player_stats import score_props
 from model.predict import score_week
 from report.build_report import _by_day, _day_header, _model_metrics, _row_data
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
+from report.props import PROPS_STYLE
 from run_week import get_current_week
 
 ASSETS_DIR = os.path.join(ROOT_DIR, "report", "assets")
@@ -338,7 +340,7 @@ footer {{
   color: var(--muted);
   line-height: 1.6;
 }}
-</style>
+{props_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -398,6 +400,7 @@ GAME_BLOCK = """<div class="game">
   </div>
 
   <div class="why">{why}</div>
+  {props_section}
 </div>"""
 
 
@@ -418,13 +421,14 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     if week is None:
         week = get_current_week(season)
     predictions = score_week(week, season)
+    props = score_props(week, season)
     n_games = len(predictions)
 
     days_html = []
     for day, weekday, day_games in _by_day(predictions):
         game_htmls = []
         for _, game in day_games.iterrows():
-            d = _row_data(game)
+            d = _row_data(game, props)
             d["away_logo"] = embed(game["away_team"])
             d["home_logo"] = embed(game["home_team"])
             win_pct_num = float(d["win_pct"].rstrip("%")) if d["win_pct"] != "--" else 50.0
@@ -445,7 +449,7 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     metrics = _model_metrics()
     html = PAGE.format(
         week=week, season=season, n_games=n_games,
-        days="\n".join(days_html), oswald_b64=OSWALD_B64,
+        days="\n".join(days_html), oswald_b64=OSWALD_B64, props_style=PROPS_STYLE,
         model_type=metrics["model_type"],
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
         baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "N/A",

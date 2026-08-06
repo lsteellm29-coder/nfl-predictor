@@ -5,3 +5,4 @@ requests
 pyarrow
 python-dotenv
 xgboost
+scipy

@@ -15,6 +15,7 @@ import nfl_data_py as nfl
 import pandas as pd
 
 from config import CURRENT_SEASON
+from model.player_stats import score_props
 from model.predict import score_week
 from report.build_report import build_report
 
@@ -116,7 +117,8 @@ def run_week(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     if week is None:
         week = get_current_week(season)
     predictions = score_week(week, season)
-    path = build_report(predictions, week, season)
+    props = score_props(week, season)
+    path = build_report(predictions, week, season, props)
     log_week(predictions, week, season)
     print(f"Logged predictions -> {LOG_PATH}")
     return path

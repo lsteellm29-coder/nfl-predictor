@@ -16,6 +16,8 @@ contributes status_weight * position_weight, summed per team. Higher score
 = more/worse injuries.
 """
 
+import re
+
 import nfl_data_py as nfl
 import pandas as pd
 import requests
@@ -86,6 +88,71 @@ def _espn_team_id_to_abbr() -> dict:
         abbr = t["team"]["abbreviation"]
         mapping[t["team"]["id"]] = ESPN_ABBR_FIX.get(abbr, abbr)
     return mapping
+
+
+# Multiplies a player's own projected usage (targets/carries/attempts) in
+# model/player_stats.py -- separate from POSITION_WEIGHTS above, which is
+# about how much a missing player drags down their *team's* overall
+# outlook. This is about that specific player's own expected workload.
+# "Out"/IR players are excluded from props entirely (0.0), not just
+# discounted, since a line rarely even exists for a player who won't play.
+USAGE_MULTIPLIER = {
+    "Out": 0.0, "Injured Reserve": 0.0,
+    "Doubtful": 0.4,
+    "Questionable": 0.85,
+    "Probable": 0.97,
+}
+
+
+def _espn_athlete_id(athlete: dict) -> str | None:
+    """ESPN's injury feed doesn't expose a plain athlete.id field, but every
+    player-card link embeds it: .../player/_/id/4430821/some-name."""
+    for link in athlete.get("links", []):
+        m = re.search(r"/id/(\d+)/", link.get("href", ""))
+        if m:
+            return m.group(1)
+    return None
+
+
+def _espn_id_to_gsis_id(seasons: list[int]) -> dict:
+    """ESPN athlete id -> GSIS player_id (the id space pbp's
+    passer_player_id/rusher_player_id/receiver_player_id use), via the
+    seasonal roster table's espn_id column -- the only place these two id
+    spaces are linked."""
+    rosters = nfl.import_seasonal_rosters(seasons)
+    rosters = rosters[rosters["espn_id"].notna() & (rosters["player_id"] != "")]
+    return dict(zip(rosters["espn_id"].astype(str), rosters["player_id"]))
+
+
+def fetch_current_player_injury_status(seasons: list[int]) -> dict:
+    """GSIS player_id -> {"status", "position", "usage_multiplier"} for
+    every player currently on an injury report, live from ESPN. A player
+    whose ESPN id doesn't cross-reference to a GSIS id (rare -- recent
+    signing, practice-squad edge case) is simply absent, same fail-open
+    contract as fetch_current_injury_impact()."""
+    espn_to_gsis = _espn_id_to_gsis_id(seasons)
+
+    resp = requests.get(ESPN_INJURIES_URL, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+
+    out = {}
+    for team_block in data.get("injuries", []):
+        for entry in team_block.get("injuries", []):
+            athlete = entry.get("athlete") or {}
+            status = entry.get("status")
+            if status not in USAGE_MULTIPLIER:
+                continue  # "Active"/cleared entries carry no usage impact
+            espn_id = _espn_athlete_id(athlete)
+            gsis_id = espn_to_gsis.get(espn_id)
+            if not gsis_id:
+                continue
+            position = (athlete.get("position") or {}).get("abbreviation")
+            out[gsis_id] = {
+                "status": status, "position": position,
+                "usage_multiplier": USAGE_MULTIPLIER[status],
+            }
+    return out
 
 
 def fetch_current_injury_impact() -> dict:

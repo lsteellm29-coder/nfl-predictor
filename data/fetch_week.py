@@ -69,6 +69,7 @@ def _pick_bookmaker(bookmakers: list[dict]) -> dict | None:
 def _parse_event(event: dict, name_to_abbr: dict) -> dict:
     home_name, away_name = event["home_team"], event["away_team"]
     row = {
+        "event_id": event.get("id"),
         "home_team": name_to_abbr.get(home_name, home_name),
         "away_team": name_to_abbr.get(away_name, away_name),
         "book": None,
