@@ -16,6 +16,7 @@ import nfl_data_py as nfl
 import pandas as pd
 
 from config import CURRENT_SEASON
+from data.situational import is_short_week
 from report.logos import get_logo_url
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
@@ -247,6 +248,15 @@ def _cite_factor(feat: str, game: pd.Series, favored_abbr: str, other_abbr: str,
             return None
         f_rest, o_rest = (home_rest, away_rest) if favored_abbr == home else (away_rest, home_rest)
         return f"{favored} is working with {f_rest:.0f} days' rest heading in, versus {o_rest:.0f} for {other}"
+
+    if feat == "short_week_diff":
+        home_rest, away_rest = game.get("home_rest"), game.get("away_rest")
+        home_short, away_short = is_short_week(home_rest), is_short_week(away_rest)
+        if home_short == away_short:
+            return None
+        short_team = home if home_short else away
+        short_full, rest_days = _full_name(short_team), (home_rest if home_short else away_rest)
+        return f"{short_full} is on a short week, playing on just {rest_days:.0f} days' rest"
 
     if feat == "wind_speed":
         wind = game.get("wind_speed")

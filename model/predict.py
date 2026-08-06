@@ -324,11 +324,17 @@ def _feature_contributions(model_type: str, logistic_model, xgb_model, feat_df: 
     if model_type == "xgboost":
         return _xgboost_contributions(xgb_model, feat_df)
     if model_type == "ensemble":
-        # The ensemble's actual prediction blends both models, but for a
-        # readable explanation we use the logistic half's contributions --
-        # blending SHAP values with linear coefficients into one coherent
-        # story isn't worth the complexity for prose purposes.
-        return _logistic_contributions(logistic_model, feat_df)
+        # Both halves score on the same pre-sigmoid log-odds scale --
+        # XGBoost's binary:logistic SHAP contributions are margin-space,
+        # same as the logistic half's standardized-value * coefficient --
+        # so averaging them per feature mirrors how score_week() averages
+        # the two models' probabilities. Only using the logistic half here
+        # would hide whatever the tree model uniquely picked up on (e.g. a
+        # nonlinear injury or Elo effect), which defeats the point of
+        # explaining what the ensemble actually did.
+        logistic_contribs = _logistic_contributions(logistic_model, feat_df)
+        xgb_contribs = _xgboost_contributions(xgb_model, feat_df)
+        return {feat: (logistic_contribs[feat] + xgb_contribs[feat]) / 2 for feat in logistic_contribs}
     return _logistic_contributions(logistic_model, feat_df)
 
 
