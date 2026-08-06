@@ -14,6 +14,7 @@ import os
 
 import joblib
 import nfl_data_py as nfl
+import numpy as np
 import pandas as pd
 import requests
 
@@ -25,6 +26,7 @@ from data.situational import (
     away_travel_penalty, blowout_loss_flags, is_short_week, lookahead_flags,
 )
 from data.team_stats import build_rolling_team_stats, build_team_game_stats
+from model.calibration import apply_calibrator
 from model.elo import compute_elo_ratings
 from model.train import FEATURE_COLS, STAT_COLS, predict_proba
 
@@ -336,6 +338,10 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     xgb_model = saved["xgb_model"]
     model_type = saved.get("model_type", "logistic")
     spread_calibration = saved["spread_calibration"]
+    # From model/calibration.py's audit -- only set to something other than
+    # None if a calibrator demonstrably beat the raw model on a true
+    # holdout, not just fit-and-eyeballed on the same data.
+    calibrator = saved.get("calibrator")
 
     games = fetch_week(week, season)
     stats = get_pregame_stats(season, week)
@@ -393,7 +399,8 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             continue
 
         feat_df = pd.DataFrame([feat])[FEATURE_COLS]
-        home_win_prob = predict_proba(model_type, logistic_model, xgb_model, feat_df)[0, 1]
+        raw_win_prob = predict_proba(model_type, logistic_model, xgb_model, feat_df)[0, 1]
+        home_win_prob = float(apply_calibrator(calibrator, np.array([raw_win_prob]))[0])
         implied_spread = spread_calibration.predict([[home_win_prob]])[0]
 
         row["home_win_prob"] = home_win_prob
