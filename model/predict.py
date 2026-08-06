@@ -22,13 +22,17 @@ from config import CURRENT_SEASON
 from data.fetch_injuries import fetch_current_injury_impact
 from data.fetch_week import fetch_week
 from data.fetch_weather import fetch_forecast
+from data.player_trends import qb_game_log, qb_streak, rb_game_log, rb_streak
+from data.positional_matchups import build_position_tables, game_mismatches, position_map
 from data.situational import (
     away_travel_penalty, blowout_loss_flags, is_short_week, lookahead_flags,
 )
+from data.team_history import coach_h2h, team_last_n_meetings
 from data.team_stats import build_rolling_team_stats, build_team_game_stats
 from model.calibration import apply_calibrator
 from model.elo import compute_elo_ratings
 from model.train import FEATURE_COLS, STAT_COLS, predict_proba
+from report.narrative import select_lead_narrative
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEAM_STATS_PATH = os.path.join(ROOT_DIR, "data", "cache", "team_stats.parquet")
@@ -338,6 +342,25 @@ def _feature_contributions(model_type: str, logistic_model, xgb_model, feat_df: 
     return _logistic_contributions(logistic_model, feat_df)
 
 
+def _fallback_season_pbp(season: int) -> pd.DataFrame:
+    pbp = pd.read_parquet(PBP_PATH)
+    return pbp[pbp["season"] == season - 1]
+
+
+def _current_season_pbp(season: int, week: int, fallback_pbp: pd.DataFrame) -> pd.DataFrame:
+    """This season's pbp through `week`, or an empty frame shaped like
+    `fallback_pbp` if the season hasn't produced any games yet -- same
+    empty-early-season handling as _current_season_td_data."""
+    schedule = nfl.import_schedules([season])
+    played = schedule[
+        (schedule["game_type"] == "REG") & schedule["home_score"].notna() & (schedule["week"] < week)
+    ]
+    if played.empty:
+        return fallback_pbp.iloc[0:0]
+    pbp = nfl.import_pbp_data([season], downcast=True)
+    return pbp[pbp["week"] < week]
+
+
 def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     saved = joblib.load(MODEL_PATH)
     logistic_model = saved["logistic_model"]
@@ -373,6 +396,21 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         sum(implied_totals.values()) / len(implied_totals) if implied_totals else 0.0
     )
 
+    # Section 8 narrative-lookup layer (data/positional_matchups.py,
+    # data/player_trends.py, data/team_history.py) -- built once per week,
+    # not per game, since it's the same underlying season data for every
+    # matchup. None of this feeds FEATURE_COLS; report/narrative.py only
+    # ever uses it to explain a pick already made below, never to make one.
+    fallback_pbp = _fallback_season_pbp(season)
+    current_pbp = _current_season_pbp(season, week, fallback_pbp)
+    pos_map = {**position_map([season - 1]), **position_map([season])}
+    current_pos_tables = build_position_tables(current_pbp, pos_map)
+    fallback_pos_tables = build_position_tables(fallback_pbp, pos_map)
+    current_qb_log, fallback_qb_log = qb_game_log(current_pbp), qb_game_log(fallback_pbp)
+    current_rb_log, fallback_rb_log = rb_game_log(current_pbp, pos_map), rb_game_log(fallback_pbp, pos_map)
+    historical_schedule = pd.read_parquet(SCHEDULES_PATH)
+    combined_schedule = pd.concat([historical_schedule, nfl.import_schedules([season])], ignore_index=True)
+
     rows = []
     for _, game in games.iterrows():
         feat = _build_features(game, stats, injury_impact, elo_ratings, blowout_flags, lookahead_flags_now)
@@ -401,6 +439,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             row["implied_spread"] = None
             row["edge"] = None
             row["top_factors"] = None
+            row["lead_narrative"] = None
             rows.append(row)
             continue
 
@@ -416,6 +455,22 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
 
         contributions = _feature_contributions(model_type, logistic_model, xgb_model, feat_df)
         row["top_factors"] = sorted(contributions.items(), key=lambda kv: -abs(kv[1]))[:3]
+
+        home, away = game["home_team"], game["away_team"]
+        winner, loser = (home, away) if home_win_prob >= 0.5 else (away, home)
+        mismatches = game_mismatches(home, away, current_pos_tables, fallback_pos_tables)
+        qb_streaks = [
+            qb_streak(home, game.get("home_qb_id"), current_qb_log, fallback_qb_log),
+            qb_streak(away, game.get("away_qb_id"), current_qb_log, fallback_qb_log),
+        ]
+        rb_streaks = [
+            rb_streak(home, current_rb_log, fallback_rb_log),
+            rb_streak(away, current_rb_log, fallback_rb_log),
+        ]
+        team_h2h = team_last_n_meetings(home, away, combined_schedule)
+        coach_h2h_record = coach_h2h(game.get("home_coach"), game.get("away_coach"), combined_schedule)
+        row["lead_narrative"] = select_lead_narrative(
+            winner, loser, mismatches, qb_streaks, rb_streaks, team_h2h, coach_h2h_record)
         rows.append(row)
 
     return pd.DataFrame(rows)

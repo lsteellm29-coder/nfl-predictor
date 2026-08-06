@@ -19,7 +19,7 @@ PREFERRED_BOOK = "draftkings"
 SCHEDULE_COLS = [
     "game_id", "season", "week", "gameday", "gametime", "weekday",
     "away_team", "home_team", "home_rest", "away_rest", "div_game",
-    "roof", "location", "away_qb_name", "home_qb_name",
+    "roof", "location", "away_qb_id", "away_qb_name", "home_qb_id", "home_qb_name",
     "away_coach", "home_coach",
 ]
 

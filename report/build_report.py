@@ -18,6 +18,7 @@ import pandas as pd
 from config import CURRENT_SEASON
 from data.situational import is_short_week
 from report.logos import get_logo_url
+from report.narrative import phrase_lead_narrative
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "model.joblib")
@@ -382,6 +383,11 @@ def _explain(game: pd.Series, winner: str) -> str:
         (winner_cites if side == winner else other_cites).append(cite)
 
     sentences = [_pick(OPENERS, seed, 0).format(winner=winner_full, pct=f"{max(game['home_win_prob'], 1 - game['home_win_prob']) * 100:.0f}%")]
+
+    lead = game.get("lead_narrative")
+    if lead:
+        winner_coach = game.get("home_coach") if winner == home else game.get("away_coach")
+        sentences.append(phrase_lead_narrative(lead, winner, winner_coach, _full_name))
 
     if winner_cites:
         sentences.append(f"The biggest reasons why: {_join(winner_cites)}.")
