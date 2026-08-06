@@ -8,6 +8,7 @@ forward from the end of the previous season (there's no in-season signal yet,
 so last season's final read on the team is the best available estimate).
 """
 
+import datetime
 import math
 import os
 
@@ -19,9 +20,10 @@ import requests
 from config import CURRENT_SEASON
 from data.fetch_injuries import fetch_current_injury_impact
 from data.fetch_week import fetch_week
+from data.fetch_weather import fetch_forecast
 from data.team_stats import build_rolling_team_stats, build_team_game_stats
 from model.elo import compute_elo_ratings
-from model.train import FEATURE_COLS, STAT_COLS
+from model.train import FEATURE_COLS, STAT_COLS, predict_proba
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEAM_STATS_PATH = os.path.join(ROOT_DIR, "data", "cache", "team_stats.parquet")
@@ -90,6 +92,26 @@ def get_pregame_stats(season: int, week: int) -> pd.DataFrame:
     return combined.set_index("team")
 
 
+def get_game_wind_speed(game: pd.Series) -> float:
+    """Live forecast wind (mph) for this game's stadium, or 0 for dome/
+    closed-roof games and for games too far out for a forecast to exist yet
+    (nothing knowable this far ahead, same as assuming calm)."""
+    if game.get("roof") not in ("outdoors", "open"):
+        return 0.0
+    if pd.isna(game.get("gameday")) or pd.isna(game.get("gametime")):
+        return 0.0
+    try:
+        kickoff = datetime.datetime.strptime(f"{game['gameday']} {game['gametime']}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return 0.0
+
+    try:
+        forecast = fetch_forecast(game["home_team"], kickoff)
+    except requests.RequestException:
+        return 0.0
+    return forecast["wind"] if forecast else 0.0
+
+
 def _build_features(
     game: pd.Series, stats: pd.DataFrame, injury_impact: dict, elo_ratings: dict,
 ) -> dict | None:
@@ -105,6 +127,7 @@ def _build_features(
     # worth listing -- 0 impact, not missing data.
     feat["injury_impact_diff"] = injury_impact.get(home, 0.0) - injury_impact.get(away, 0.0)
     feat["elo_diff"] = elo_ratings.get(home, 1500.0) - elo_ratings.get(away, 1500.0)
+    feat["wind_speed"] = get_game_wind_speed(game)
     return feat
 
 
@@ -266,21 +289,22 @@ def _xgboost_contributions(model, feat_df: pd.DataFrame) -> dict:
     return dict(zip(feat_df.columns, contribs[:-1]))  # last column is the bias term
 
 
-def _feature_contributions(model, model_type: str, feat_df: pd.DataFrame) -> dict:
+def _feature_contributions(model_type: str, logistic_model, xgb_model, feat_df: pd.DataFrame) -> dict:
     if model_type == "xgboost":
-        return _xgboost_contributions(model, feat_df)
+        return _xgboost_contributions(xgb_model, feat_df)
     if model_type == "ensemble":
         # The ensemble's actual prediction blends both models, but for a
         # readable explanation we use the logistic half's contributions --
         # blending SHAP values with linear coefficients into one coherent
         # story isn't worth the complexity for prose purposes.
-        return _logistic_contributions(model.logistic_model, feat_df)
-    return _logistic_contributions(model, feat_df)
+        return _logistic_contributions(logistic_model, feat_df)
+    return _logistic_contributions(logistic_model, feat_df)
 
 
 def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     saved = joblib.load(MODEL_PATH)
-    model = saved["model"]
+    logistic_model = saved["logistic_model"]
+    xgb_model = saved["xgb_model"]
     model_type = saved.get("model_type", "logistic")
     spread_calibration = saved["spread_calibration"]
 
@@ -311,6 +335,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     for _, game in games.iterrows():
         feat = _build_features(game, stats, injury_impact, elo_ratings)
         row = game.to_dict()
+        row["wind_speed"] = feat["wind_speed"] if feat else get_game_wind_speed(game)
         row["home_td_scorer"] = get_td_scorer_prediction(
             game["home_team"], game["away_team"], current_td_data, fallback_td_data,
             def_rates, league_avg_def_rate, implied_totals, league_avg_implied_total)
@@ -334,7 +359,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             continue
 
         feat_df = pd.DataFrame([feat])[FEATURE_COLS]
-        home_win_prob = model.predict_proba(feat_df)[0, 1]
+        home_win_prob = predict_proba(model_type, logistic_model, xgb_model, feat_df)[0, 1]
         implied_spread = spread_calibration.predict([[home_win_prob]])[0]
 
         row["home_win_prob"] = home_win_prob
@@ -342,7 +367,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         # positive edge = model favors the home team more than the market does
         row["edge"] = implied_spread - game["spread_line"] if pd.notna(game["spread_line"]) else None
 
-        contributions = _feature_contributions(model, model_type, feat_df)
+        contributions = _feature_contributions(model_type, logistic_model, xgb_model, feat_df)
         row["top_factors"] = sorted(contributions.items(), key=lambda kv: -abs(kv[1]))[:3]
         rows.append(row)
 

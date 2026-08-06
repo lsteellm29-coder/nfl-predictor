@@ -40,6 +40,7 @@ STAT_COLS = [
 ]
 FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
     "home_field_context_diff", "rest_diff", "injury_impact_diff", "elo_diff",
+    "wind_speed",
 ]
 
 
@@ -93,6 +94,12 @@ def build_feature_frame(
     )
     games["elo_diff"] = games["home_elo_pre"] - games["away_elo_pre"]
 
+    # Wind is game-level, not team-relative -- both sides play in the same
+    # conditions, so no home/away diff makes sense here. NaN (dome/closed
+    # roof, or a handful of older outdoor games missing the field) means no
+    # wind impact, i.e. 0.
+    games["wind_speed"] = games["wind"].fillna(0.0)
+
     games["home_win"] = (games["home_score"] > games["away_score"]).astype(int)
 
     return games.dropna(subset=FEATURE_COLS)
@@ -116,40 +123,38 @@ def train_xgboost(train_df: pd.DataFrame) -> XGBClassifier:
     return model
 
 
-class EnsembleModel:
-    """Averages the logistic regression's and XGBoost's win probabilities.
-    Exposes the same predict/predict_proba interface as either sub-model so
-    the rest of the pipeline (spread calibration, predict.py) doesn't need
-    to special-case it."""
-
-    def __init__(self, logistic_model, xgb_model):
-        self.logistic_model = logistic_model
-        self.xgb_model = xgb_model
-
-    def predict_proba(self, X):
-        return (self.logistic_model.predict_proba(X) + self.xgb_model.predict_proba(X)) / 2
-
-    def predict(self, X):
-        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+def predict_proba(model_type: str, logistic_model, xgb_model, X):
+    """Win-probability array for whichever model type won, given both
+    sub-models. Deliberately a plain function rather than a custom
+    picklable class -- a class instance's pickled identity depends on
+    which module __name__ happens to be "__main__" in at save time (e.g.
+    `python -m model.train` vs `python run_week.py`), which breaks
+    unpickling from a different entry point. Plain sklearn/xgboost objects
+    don't have that problem, so this keeps every saved artifact to those."""
+    if model_type == "xgboost":
+        return xgb_model.predict_proba(X)
+    if model_type == "logistic":
+        return logistic_model.predict_proba(X)
+    return (logistic_model.predict_proba(X) + xgb_model.predict_proba(X)) / 2
 
 
-def train_spread_calibration(train_df: pd.DataFrame, model) -> LinearRegression:
+def train_spread_calibration(train_df: pd.DataFrame, model_type: str, logistic_model, xgb_model) -> LinearRegression:
     """Maps the model's home win probability to an implied Vegas-style spread,
     fit on how the market actually priced games with similar win probabilities
     (Section 4.3) -- lets predict.py compare the model directly against the
     current spread_line to find an edge."""
-    win_prob = model.predict_proba(train_df[FEATURE_COLS])[:, 1]
+    win_prob = predict_proba(model_type, logistic_model, xgb_model, train_df[FEATURE_COLS])[:, 1]
     return LinearRegression().fit(win_prob.reshape(-1, 1), train_df["spread_line"])
 
 
-def _evaluate(name: str, model, train_df: pd.DataFrame, test_df: pd.DataFrame) -> dict:
-    train_acc = accuracy_score(train_df["home_win"], model.predict(train_df[FEATURE_COLS]))
-    test_proba = model.predict_proba(test_df[FEATURE_COLS])[:, 1]
-    test_pred = (test_proba >= 0.5).astype(int)
-    test_acc = accuracy_score(test_df["home_win"], test_pred)
+def _evaluate(name: str, logistic_model, xgb_model, train_df: pd.DataFrame, test_df: pd.DataFrame) -> dict:
+    train_proba = predict_proba(name, logistic_model, xgb_model, train_df[FEATURE_COLS])[:, 1]
+    train_acc = accuracy_score(train_df["home_win"], (train_proba >= 0.5).astype(int))
+    test_proba = predict_proba(name, logistic_model, xgb_model, test_df[FEATURE_COLS])[:, 1]
+    test_acc = accuracy_score(test_df["home_win"], (test_proba >= 0.5).astype(int))
     test_loss = log_loss(test_df["home_win"], test_proba)
     print(f"  {name:12s} train acc {train_acc:.3f}  test acc {test_acc:.3f}  test log loss {test_loss:.3f}")
-    return {"name": name, "model": model, "test_acc": test_acc, "test_loss": test_loss}
+    return {"name": name, "test_acc": test_acc, "test_loss": test_loss}
 
 
 def main():
@@ -170,26 +175,30 @@ def main():
 
     logistic_model = train_logistic(train_df)
     xgb_model = train_xgboost(train_df)
-    ensemble_model = EnsembleModel(logistic_model, xgb_model)
 
     print("Comparing candidate models on the 2025 holdout:")
     candidates = [
-        _evaluate("logistic", logistic_model, train_df, test_df),
-        _evaluate("xgboost", xgb_model, train_df, test_df),
-        _evaluate("ensemble", ensemble_model, train_df, test_df),
+        _evaluate("logistic", logistic_model, xgb_model, train_df, test_df),
+        _evaluate("xgboost", logistic_model, xgb_model, train_df, test_df),
+        _evaluate("ensemble", logistic_model, xgb_model, train_df, test_df),
     ]
     winner = max(candidates, key=lambda c: (c["test_acc"], -c["test_loss"]))
-    print(f"Winner: {winner['name']} (test acc {winner['test_acc']:.3f})")
-
-    model = winner["model"]
     model_type = winner["name"]
-    spread_calibration = train_spread_calibration(train_df, model)
+    print(f"Winner: {model_type} (test acc {winner['test_acc']:.3f})")
+
+    spread_calibration = train_spread_calibration(train_df, model_type, logistic_model, xgb_model)
 
     joblib.dump({
-        "model": model,
+        "logistic_model": logistic_model,
+        "xgb_model": xgb_model,
         "model_type": model_type,
         "feature_cols": FEATURE_COLS,
         "spread_calibration": spread_calibration,
+        # So the report can show real, current numbers instead of a
+        # hardcoded string that goes stale the next time this is retrained.
+        "test_accuracy": winner["test_acc"],
+        "baseline_accuracy": max(baseline_acc, 1 - baseline_acc),
+        "test_season": TEST_SEASON,
     }, MODEL_PATH)
     print(f"Saved {model_type} model -> {MODEL_PATH}")
 

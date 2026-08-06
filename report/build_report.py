@@ -11,6 +11,7 @@ import hashlib
 import os
 import textwrap
 
+import joblib
 import nfl_data_py as nfl
 import pandas as pd
 
@@ -18,6 +19,20 @@ from config import CURRENT_SEASON
 from report.logos import get_logo_url
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "model.joblib")
+
+
+def _model_metrics() -> dict:
+    """Real, current backtest numbers from whatever's actually saved in
+    model.joblib -- avoids a hardcoded accuracy string going stale the next
+    time the model is retrained."""
+    saved = joblib.load(MODEL_PATH)
+    return {
+        "test_accuracy": saved.get("test_accuracy"),
+        "baseline_accuracy": saved.get("baseline_accuracy"),
+        "test_season": saved.get("test_season"),
+        "model_type": saved.get("model_type", "model"),
+    }
 
 # (higher_is_better, subject phrase, value format) per feature. Used to
 # ground the "why" paragraph in real numbers instead of vague phrases.
@@ -123,7 +138,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
 <h1>NFL Week {week} Predictions -- {season}</h1>
-<div class="caveat">This model backtested at 61.4% accuracy on the 2025 season (vs. 53.6% for always picking the home team) -- a real edge, but far from certain. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Treat all of this as informed estimates, not guarantees.</div>
+<div class="caveat">This {model_type} model backtested at {test_accuracy} accuracy on the {test_season} season (vs. {baseline_accuracy} for always picking the home team) -- a real edge, but far from certain. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Treat all of this as informed estimates, not guarantees.</div>
 {days}
 </body>
 </html>
@@ -232,6 +247,14 @@ def _cite_factor(feat: str, game: pd.Series, favored_abbr: str, other_abbr: str,
             return None
         f_rest, o_rest = (home_rest, away_rest) if favored_abbr == home else (away_rest, home_rest)
         return f"{favored} is working with {f_rest:.0f} days' rest heading in, versus {o_rest:.0f} for {other}"
+
+    if feat == "wind_speed":
+        wind = game.get("wind_speed")
+        if wind is None or pd.isna(wind) or wind < 5:
+            return None  # not worth mentioning calm conditions
+        # Wind affects both teams equally -- there's no "favored" side to
+        # name here, just a real condition worth flagging.
+        return f"the forecast calls for wind around {wind:.0f} mph, which can affect passing and kicking for both teams"
 
     if feat == "home_field_context_diff":
         h_val = (game.get("home_stats") or {}).get("home_point_diff_avg")
@@ -436,8 +459,12 @@ def _by_day(predictions: pd.DataFrame):
 
 def print_report(predictions: pd.DataFrame, week: int, season: int) -> None:
     print(f"\nNFL Week {week} Predictions -- {season}")
+    metrics = _model_metrics()
+    test_acc = f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "an unknown"
+    baseline_acc = f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "an unknown"
     print(textwrap.fill(
-        "Model backtested at 61.4% accuracy on the 2025 season (vs. 53.6% for always "
+        f"{metrics['model_type'].capitalize()} model backtested at {test_acc} accuracy on the "
+        f"{metrics['test_season'] or 'most recent'} season (vs. {baseline_acc} for always "
         "picking the home team). TD-scorer odds are adjusted for the opposing defense's "
         "TDs-allowed rate and this game's Vegas-implied scoring environment. Treat as "
         "informed estimates, not guarantees.",
@@ -463,7 +490,15 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int) -> str:
     for day, weekday, day_games in _by_day(predictions):
         games_html = "\n".join(GAME_TEMPLATE.format(**_row_data(g)) for _, g in day_games.iterrows())
         days_html.append(DAY_TEMPLATE.format(day_header=_day_header(day, weekday), games=games_html))
-    return HTML_TEMPLATE.format(week=week, season=season, days="\n".join(days_html))
+
+    metrics = _model_metrics()
+    return HTML_TEMPLATE.format(
+        week=week, season=season, days="\n".join(days_html),
+        model_type=metrics["model_type"],
+        test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "an unknown",
+        baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "an unknown",
+        test_season=metrics["test_season"] or "the most recent",
+    )
 
 
 def save_report(predictions: pd.DataFrame, week: int, season: int = CURRENT_SEASON) -> str:

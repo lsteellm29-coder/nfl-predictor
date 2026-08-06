@@ -18,7 +18,7 @@ sys.path.insert(0, ROOT_DIR)
 
 from config import CURRENT_SEASON
 from model.predict import score_week
-from report.build_report import _by_day, _day_header, _row_data
+from report.build_report import _by_day, _day_header, _model_metrics, _row_data
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
 from run_week import get_current_week
 
@@ -348,12 +348,12 @@ footer {{
   </div>
 
   <div class="statline">
-    <div class="stat"><div class="num">61.4%</div><div class="label">Model accuracy, 2025 backtest</div></div>
-    <div class="stat"><div class="num">53.6%</div><div class="label">Always-home baseline</div></div>
+    <div class="stat"><div class="num">{test_accuracy}</div><div class="label">Model accuracy, {test_season} backtest</div></div>
+    <div class="stat"><div class="num">{baseline_accuracy}</div><div class="label">Always-home baseline</div></div>
     <div class="stat"><div class="num">{n_games}</div><div class="label">Games this week</div></div>
   </div>
 
-  <div class="caveat">A logistic regression trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record) versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Informed estimates, not guarantees.</div>
+  <div class="caveat">A {model_type} model trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record), Elo ratings, injury reports, and weather, versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Informed estimates, not guarantees.</div>
 
   {days}
 
@@ -442,9 +442,14 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
             ))
         days_html.append(DAY_BLOCK.format(day_header=_day_header(day, weekday), games="\n".join(game_htmls)))
 
+    metrics = _model_metrics()
     html = PAGE.format(
         week=week, season=season, n_games=n_games,
         days="\n".join(days_html), oswald_b64=OSWALD_B64,
+        model_type=metrics["model_type"],
+        test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
+        baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "N/A",
+        test_season=metrics["test_season"] or "recent",
     )
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
