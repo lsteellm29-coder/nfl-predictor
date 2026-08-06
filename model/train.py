@@ -40,6 +40,12 @@ STAT_COLS = [
     "off_third_down_pct_avg", "def_third_down_pct_avg",
     "turnover_diff_avg", "red_zone_td_pct_avg",
     "ats_win_pct_season", "ats_win_pct_last5",
+    # Section 1: opponent-adjusted versions of the same EPA/play and
+    # yards/play stats (data/opponent_adjust.py), kept alongside the raw
+    # ones above rather than replacing them -- correlated but not
+    # redundant, and worth letting a regularized model weigh separately.
+    "off_epa_per_play_adj_avg", "def_epa_per_play_adj_avg",
+    "off_ypp_adj_avg", "def_ypp_adj_avg",
 ]
 FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
     "home_field_context_diff", "rest_diff", "injury_impact_diff", "elo_diff",

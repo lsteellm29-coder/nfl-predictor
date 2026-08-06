@@ -61,6 +61,10 @@ FEATURE_INFO = {
     "ats_win_pct_last5_diff": (True, "{team} has covered in {v} of its last five games", "{:.0%}"),
     "injury_impact_diff": (False, "{team}'s injury report carries an impact score of {v}", "{:.1f}"),
     "elo_diff": (True, "{team} carries an Elo rating of {v}, reflecting recent form more than season-long averages", "{:.0f}"),
+    "off_epa_per_play_adj_avg_diff": (True, "{team}'s offense grades out at {v} EPA per play once you account for the defenses they've faced", "{:+.2f}"),
+    "def_epa_per_play_adj_avg_diff": (False, "{team}'s defense is allowing {v} EPA per play once you account for the offenses they've faced", "{:+.2f}"),
+    "off_ypp_adj_avg_diff": (True, "{team} is picking up {v} yards per play on offense, adjusted for opponent strength", "{:.1f}"),
+    "def_ypp_adj_avg_diff": (False, "{team} is allowing {v} yards per play on defense, adjusted for opponent strength", "{:.1f}"),
 }
 COMPARATORS = ["well ahead of", "clearly better than", "a step above"]
 

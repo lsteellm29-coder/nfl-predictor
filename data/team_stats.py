@@ -10,6 +10,8 @@ import os
 import numpy as np
 import pandas as pd
 
+from data.opponent_adjust import add_opponent_adjusted_columns, roll_opponent_adjusted
+
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 SCHEDULES_PATH = os.path.join(CACHE_DIR, "schedules.parquet")
 PBP_PATH = os.path.join(CACHE_DIR, "pbp.parquet")
@@ -187,7 +189,18 @@ def build_rolling_team_stats(team_game_stats: pd.DataFrame) -> pd.DataFrame:
     ]
     keep = ["season", "week", "team", "opponent", "is_home", "rest_days",
             "div_game"] + rolling_cols
-    return rolled[keep]
+    result = rolled[keep]
+
+    # Section 1: opponent-adjusted EPA/play and yards/play, kept as
+    # separate *_adj_avg columns alongside the raw ones above. Lives in
+    # this function (not just main()'s CLI path) so live current-season
+    # scoring in model/predict.py gets these too, not just the cached
+    # historical parquet.
+    games_adj = add_opponent_adjusted_columns(team_game_stats, result)
+    adj_rolling = roll_opponent_adjusted(games_adj)
+    result = result.merge(adj_rolling, on=["season", "week", "team"], how="left")
+
+    return result
 
 
 def main():
