@@ -20,6 +20,7 @@ from config import CURRENT_SEASON
 from data.fetch_injuries import fetch_current_injury_impact
 from data.fetch_week import fetch_week
 from data.team_stats import build_rolling_team_stats, build_team_game_stats
+from model.elo import compute_elo_ratings
 from model.train import FEATURE_COLS, STAT_COLS
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -59,6 +60,26 @@ def _fallback_stats(season: int) -> pd.DataFrame:
     return prior.sort_values("week").groupby("team").tail(1)
 
 
+def get_current_elo_ratings(season: int) -> dict:
+    """Each team's Elo rating as of right now, computed by replaying every
+    game from the start of the cached historical window through whatever's
+    been played of the current season so far -- Elo has to be run
+    continuously to mean anything, unlike the rolling stats which reset
+    each season.
+
+    The full current-season schedule (including future, unplayed games) is
+    passed in, not filtered to a target week -- unplayed games never update
+    a rating (compute_elo_ratings skips games with no score), but the
+    season needs at least one row present so the season-boundary
+    regression-to-the-mean actually fires even before the season's first
+    game has been played."""
+    historical = pd.read_parquet(SCHEDULES_PATH)
+    current = nfl.import_schedules([season])
+    combined = pd.concat([historical, current], ignore_index=True)
+    _, ratings = compute_elo_ratings(combined)
+    return ratings
+
+
 def get_pregame_stats(season: int, week: int) -> pd.DataFrame:
     current = _current_season_stats(season, week)
     fallback = _fallback_stats(season)
@@ -69,7 +90,9 @@ def get_pregame_stats(season: int, week: int) -> pd.DataFrame:
     return combined.set_index("team")
 
 
-def _build_features(game: pd.Series, stats: pd.DataFrame, injury_impact: dict) -> dict | None:
+def _build_features(
+    game: pd.Series, stats: pd.DataFrame, injury_impact: dict, elo_ratings: dict,
+) -> dict | None:
     home, away = game["home_team"], game["away_team"]
     if home not in stats.index or away not in stats.index:
         return None
@@ -81,6 +104,7 @@ def _build_features(game: pd.Series, stats: pd.DataFrame, injury_impact: dict) -
     # A team with no key absent from the live injury feed just had nothing
     # worth listing -- 0 impact, not missing data.
     feat["injury_impact_diff"] = injury_impact.get(home, 0.0) - injury_impact.get(away, 0.0)
+    feat["elo_diff"] = elo_ratings.get(home, 1500.0) - elo_ratings.get(away, 1500.0)
     return feat
 
 
@@ -216,27 +240,53 @@ def get_implied_team_totals(games: pd.DataFrame) -> dict:
     return totals
 
 
-def _feature_contributions(model, feat_df: pd.DataFrame) -> dict:
-    """Each feature's signed contribution to the home-win logit: the same
+def _logistic_contributions(model, feat_df: pd.DataFrame) -> dict:
+    """Each feature's signed contribution to the home-win logit: the
     standardized value the logistic regression actually saw, times its
-    learned coefficient. Positive = pushed the prediction toward the home
-    team; this is what the model actually did, not an assumption about which
-    raw stat direction is 'good' (see the def_epa_per_play_avg_diff sign
-    flip caught during training -- collinear features can have
-    counter-intuitive individual coefficients)."""
+    learned coefficient. This is what the model actually did, not an
+    assumption about which raw stat direction is 'good' (see the
+    def_epa_per_play_avg_diff sign flip caught during training -- collinear
+    features can have counter-intuitive individual coefficients)."""
     scaler = model.named_steps["standardscaler"]
     logreg = model.named_steps["logisticregression"]
     scaled = scaler.transform(feat_df)[0]
     return dict(zip(feat_df.columns, scaled * logreg.coef_[0]))
 
 
+def _xgboost_contributions(model, feat_df: pd.DataFrame) -> dict:
+    """Exact per-feature SHAP contributions to the predicted margin, via
+    XGBoost's own TreeExplainer-equivalent (pred_contribs=True) -- this is
+    the real decomposition of what the trees did, not an approximation.
+    Coefficients don't exist for a tree ensemble, so this replaces
+    _logistic_contributions for that model type."""
+    import xgboost
+
+    booster = model.get_booster()
+    contribs = booster.predict(xgboost.DMatrix(feat_df), pred_contribs=True)[0]
+    return dict(zip(feat_df.columns, contribs[:-1]))  # last column is the bias term
+
+
+def _feature_contributions(model, model_type: str, feat_df: pd.DataFrame) -> dict:
+    if model_type == "xgboost":
+        return _xgboost_contributions(model, feat_df)
+    if model_type == "ensemble":
+        # The ensemble's actual prediction blends both models, but for a
+        # readable explanation we use the logistic half's contributions --
+        # blending SHAP values with linear coefficients into one coherent
+        # story isn't worth the complexity for prose purposes.
+        return _logistic_contributions(model.logistic_model, feat_df)
+    return _logistic_contributions(model, feat_df)
+
+
 def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     saved = joblib.load(MODEL_PATH)
     model = saved["model"]
+    model_type = saved.get("model_type", "logistic")
     spread_calibration = saved["spread_calibration"]
 
     games = fetch_week(week, season)
     stats = get_pregame_stats(season, week)
+    elo_ratings = get_current_elo_ratings(season)
 
     try:
         injury_impact = fetch_current_injury_impact()
@@ -259,7 +309,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
 
     rows = []
     for _, game in games.iterrows():
-        feat = _build_features(game, stats, injury_impact)
+        feat = _build_features(game, stats, injury_impact, elo_ratings)
         row = game.to_dict()
         row["home_td_scorer"] = get_td_scorer_prediction(
             game["home_team"], game["away_team"], current_td_data, fallback_td_data,
@@ -270,9 +320,11 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         if game["home_team"] in stats.index:
             row["home_stats"] = stats.loc[game["home_team"]].to_dict()
             row["home_stats"]["injury_impact"] = injury_impact.get(game["home_team"], 0.0)
+            row["home_stats"]["elo"] = elo_ratings.get(game["home_team"], 1500.0)
         if game["away_team"] in stats.index:
             row["away_stats"] = stats.loc[game["away_team"]].to_dict()
             row["away_stats"]["injury_impact"] = injury_impact.get(game["away_team"], 0.0)
+            row["away_stats"]["elo"] = elo_ratings.get(game["away_team"], 1500.0)
         if feat is None:
             row["home_win_prob"] = None
             row["implied_spread"] = None
@@ -290,7 +342,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         # positive edge = model favors the home team more than the market does
         row["edge"] = implied_spread - game["spread_line"] if pd.notna(game["spread_line"]) else None
 
-        contributions = _feature_contributions(model, feat_df)
+        contributions = _feature_contributions(model, model_type, feat_df)
         row["top_factors"] = sorted(contributions.items(), key=lambda kv: -abs(kv[1]))[:3]
         rows.append(row)
 

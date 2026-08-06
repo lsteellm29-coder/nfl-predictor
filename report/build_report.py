@@ -43,6 +43,7 @@ FEATURE_INFO = {
     "ats_win_pct_season_diff": (True, "{team} has covered the betting spread in {v} of its games this season", "{:.0%}"),
     "ats_win_pct_last5_diff": (True, "{team} has covered in {v} of its last five games", "{:.0%}"),
     "injury_impact_diff": (False, "{team}'s injury report carries an impact score of {v}", "{:.1f}"),
+    "elo_diff": (True, "{team} carries an Elo rating of {v}, reflecting recent form more than season-long averages", "{:.0f}"),
 }
 COMPARATORS = ["well ahead of", "clearly better than", "a step above"]
 

@@ -4,3 +4,4 @@ nfl_data_py
 requests
 pyarrow
 python-dotenv
+xgboost
