@@ -306,6 +306,13 @@ def _cite_factor(feat: str, game: pd.Series, favored_abbr: str, other_abbr: str,
         looking_ahead_full = _full_name(looking_ahead_team)
         return f"{looking_ahead_full} has a bigger divisional game on deck next week, a classic lookahead trap spot"
 
+    if feat == "market_spread":
+        vegas = game.get("spread_line")
+        if vegas is None or pd.isna(vegas) or abs(vegas) < 1:
+            return None  # a near-pick'em line isn't a reason to point to
+        return (f"the market itself leans this way too -- {favored}'s own line is one of the model's "
+                f"direct inputs, not just something it gets compared against afterward")
+
     if feat == "home_field_context_diff":
         h_val = (game.get("home_stats") or {}).get("home_point_diff_avg")
         a_val = (game.get("away_stats") or {}).get("away_point_diff_avg")

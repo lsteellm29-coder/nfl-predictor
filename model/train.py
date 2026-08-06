@@ -64,6 +64,18 @@ FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
     "off_elo_diff", "def_elo_diff",
     "wind_speed", "short_week_diff", "away_travel_penalty", "div_game",
     "blowout_loss_diff", "lookahead_diff",
+    # Phase 6 (v3 spec): the actual market spread, not just the post-hoc
+    # "edge" comparison -- the line already prices in real-time
+    # information (injury news, weather, sharp money) this model doesn't
+    # otherwise see. NOTE: nflverse's cached spread_line isn't documented
+    # as opening vs. closing, and live scoring (data/fetch_week.py, run
+    # Wednesday mornings per weekly_pipeline.sh) pulls whatever line The
+    # Odds API has posted at that moment -- likely earlier-week, not
+    # closing. If the historical value skews closer to closing, backtested
+    # accuracy here may not fully replicate in live serving, since the
+    # model would be trained on a more-informed line than it actually
+    # receives when scoring an upcoming week.
+    "market_spread",
 ]
 
 
@@ -121,6 +133,10 @@ def build_feature_frame(
     # model/elo.py's docstring for why the split matters.
     games["off_elo_diff"] = games["home_off_elo_pre"] - games["away_def_elo_pre"]
     games["def_elo_diff"] = games["home_def_elo_pre"] - games["away_off_elo_pre"]
+
+    # Section 6: the market's own spread as a direct model input (positive
+    # = home favored, same convention as everywhere else in this file).
+    games["market_spread"] = games["spread_line"]
 
     # Wind is game-level, not team-relative -- both sides play in the same
     # conditions, so no home/away diff makes sense here. NaN (dome/closed

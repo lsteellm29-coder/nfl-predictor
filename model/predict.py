@@ -147,6 +147,12 @@ def _build_features(
     home, away = game["home_team"], game["away_team"]
     if home not in stats.index or away not in stats.index:
         return None
+    # market_spread (Phase 6) is now a direct model input, not just a
+    # post-hoc edge comparison -- a game with no line posted yet simply
+    # can't be scored by this model, same "not enough data" treatment as
+    # a team with no rolling stats yet.
+    if pd.isna(game.get("spread_line")):
+        return None
     h, a = stats.loc[home], stats.loc[away]
 
     feat = {f"{col}_diff": h[col] - a[col] for col in STAT_COLS}
@@ -159,6 +165,7 @@ def _build_features(
     away_elo = elo_ratings.get(away, {"off": 1500.0, "def": 1500.0})
     feat["off_elo_diff"] = home_elo["off"] - away_elo["def"]
     feat["def_elo_diff"] = home_elo["def"] - away_elo["off"]
+    feat["market_spread"] = game["spread_line"]
     feat["wind_speed"] = get_game_wind_speed(game)
 
     feat["short_week_diff"] = int(is_short_week(game["home_rest"])) - int(is_short_week(game["away_rest"]))
