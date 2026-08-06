@@ -107,6 +107,10 @@ def build_feature_frame(
     games["home_field_context_diff"] = (
         games["home_point_diff_avg_home"] - games["away_point_diff_avg_away"]
     )
+    # Neutral-site/international games: the designated "home" team doesn't
+    # actually get a crowd/travel advantage, so this feature shouldn't
+    # credit them with one (Phase 9 addition, v3 spec).
+    games.loc[games["location"] == "Neutral", "home_field_context_diff"] = 0.0
     games["rest_diff"] = games["rest_days_home"] - games["rest_days_away"]
 
     # Left merge + fillna(0): a team with no rows in `injuries` that week

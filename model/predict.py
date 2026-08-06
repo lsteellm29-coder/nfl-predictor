@@ -156,7 +156,12 @@ def _build_features(
     h, a = stats.loc[home], stats.loc[away]
 
     feat = {f"{col}_diff": h[col] - a[col] for col in STAT_COLS}
-    feat["home_field_context_diff"] = h["home_point_diff_avg"] - a["away_point_diff_avg"]
+    # Neutral-site/international games get no home-field credit -- same
+    # treatment as model/train.py's build_feature_frame.
+    if game.get("location") == "Neutral":
+        feat["home_field_context_diff"] = 0.0
+    else:
+        feat["home_field_context_diff"] = h["home_point_diff_avg"] - a["away_point_diff_avg"]
     feat["rest_diff"] = game["home_rest"] - game["away_rest"]
     # A team with no key absent from the live injury feed just had nothing
     # worth listing -- 0 impact, not missing data.

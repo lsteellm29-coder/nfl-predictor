@@ -102,7 +102,12 @@ def compute_elo_ratings(schedules: pd.DataFrame):
         away_share = 1 - home_share
         mult = _mov_multiplier(margin, home_off - away_def)
 
-        exp_home_share = _expected_share(home_off, away_def, HOME_FIELD_ADV)
+        # International/neutral-site games (schedules' own "location"
+        # field) get no home-field bonus -- the "home" team is still the
+        # designated home team for scheduling purposes, but doesn't
+        # actually get the crowd/travel advantage that bonus represents.
+        home_bonus = 0.0 if g.get("location") == "Neutral" else HOME_FIELD_ADV
+        exp_home_share = _expected_share(home_off, away_def, home_bonus)
         home_off_change = K_FACTOR * mult * (home_share - exp_home_share)
 
         exp_away_share = _expected_share(away_off, home_def)
