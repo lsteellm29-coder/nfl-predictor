@@ -256,6 +256,34 @@ def _cite_factor(feat: str, game: pd.Series, favored_abbr: str, other_abbr: str,
         # name here, just a real condition worth flagging.
         return f"the forecast calls for wind around {wind:.0f} mph, which can affect passing and kicking for both teams"
 
+    if feat == "away_travel_penalty":
+        away_full = _full_name(away)
+        return (f"{away_full} is on the road crossing multiple time zones for an early kickoff, "
+                f"a spot that's historically been a rough one for traveling teams")
+
+    if feat == "div_game":
+        if not game.get("div_game"):
+            return None
+        # Not a "favored" fact either -- division games just tend to play
+        # differently than the raw numbers alone would suggest.
+        return "this is a divisional matchup, which tend to run closer than the numbers alone suggest"
+
+    if feat == "blowout_loss_diff":
+        home_bl, away_bl = game.get("home_blowout_loss", 0), game.get("away_blowout_loss", 0)
+        if home_bl == away_bl:
+            return None
+        hit_team = home if home_bl else away
+        hit_full = _full_name(hit_team)
+        return f"{hit_full} is coming off a blowout loss last time out, which recent results suggest is a real drag, not just a 'get right' spot"
+
+    if feat == "lookahead_diff":
+        home_la, away_la = game.get("home_lookahead", 0), game.get("away_lookahead", 0)
+        if home_la == away_la:
+            return None
+        looking_ahead_team = home if home_la else away
+        looking_ahead_full = _full_name(looking_ahead_team)
+        return f"{looking_ahead_full} has a bigger divisional game on deck next week, a classic lookahead trap spot"
+
     if feat == "home_field_context_diff":
         h_val = (game.get("home_stats") or {}).get("home_point_diff_avg")
         a_val = (game.get("away_stats") or {}).get("away_point_diff_avg")

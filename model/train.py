@@ -17,6 +17,9 @@ from xgboost import XGBClassifier
 
 from config import HISTORICAL_SEASONS
 from data.fetch_injuries import historical_injury_impact
+from data.situational import (
+    away_travel_penalty, blowout_loss_flags, is_short_week, lookahead_flags,
+)
 from model.elo import compute_elo_ratings
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,13 +43,14 @@ STAT_COLS = [
 ]
 FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
     "home_field_context_diff", "rest_diff", "injury_impact_diff", "elo_diff",
-    "wind_speed",
+    "wind_speed", "short_week_diff", "away_travel_penalty", "div_game",
+    "blowout_loss_diff", "lookahead_diff",
 ]
 
 
 def build_feature_frame(
     schedules: pd.DataFrame, team_stats: pd.DataFrame, injuries: pd.DataFrame,
-    elo_per_game: pd.DataFrame,
+    elo_per_game: pd.DataFrame, blowouts: pd.DataFrame, lookaheads: pd.DataFrame,
 ) -> pd.DataFrame:
     """One row per game: home-minus-away rolling stat diffs + home_win label."""
     reg = schedules[
@@ -99,6 +103,35 @@ def build_feature_frame(
     # roof, or a handful of older outdoor games missing the field) means no
     # wind impact, i.e. 0.
     games["wind_speed"] = games["wind"].fillna(0.0)
+
+    # Section 5 situational spots.
+    games["short_week_diff"] = (
+        games["rest_days_home"].apply(is_short_week).astype(int)
+        - games["rest_days_away"].apply(is_short_week).astype(int)
+    )
+    games["away_travel_penalty"] = games.apply(
+        lambda g: -1 if away_travel_penalty(g["home_team"], g["away_team"], g["gametime"]) else 0,
+        axis=1,
+    )
+    games["div_game"] = games["div_game_x"]  # identical across div_game_x/_y, from the schedule directly
+
+    games = games.merge(
+        blowouts.rename(columns={"team": "home_team", "blowout_loss_last_game": "home_blowout_loss"}),
+        on=["season", "week", "home_team"], how="left",
+    ).merge(
+        blowouts.rename(columns={"team": "away_team", "blowout_loss_last_game": "away_blowout_loss"}),
+        on=["season", "week", "away_team"], how="left",
+    )
+    games["blowout_loss_diff"] = games["home_blowout_loss"].fillna(0) - games["away_blowout_loss"].fillna(0)
+
+    games = games.merge(
+        lookaheads.rename(columns={"team": "home_team", "lookahead_spot": "home_lookahead"}),
+        on=["season", "week", "home_team"], how="left",
+    ).merge(
+        lookaheads.rename(columns={"team": "away_team", "lookahead_spot": "away_lookahead"}),
+        on=["season", "week", "away_team"], how="left",
+    )
+    games["lookahead_diff"] = games["home_lookahead"].fillna(0) - games["away_lookahead"].fillna(0)
 
     games["home_win"] = (games["home_score"] > games["away_score"]).astype(int)
 
@@ -164,8 +197,10 @@ def main():
     injuries = historical_injury_impact(HISTORICAL_SEASONS)
     print("Backfilling Elo ratings...")
     elo_per_game, _ = compute_elo_ratings(schedules)
+    blowouts = blowout_loss_flags(schedules)
+    lookaheads = lookahead_flags(schedules)
 
-    games = build_feature_frame(schedules, team_stats, injuries, elo_per_game)
+    games = build_feature_frame(schedules, team_stats, injuries, elo_per_game, blowouts, lookaheads)
     train_df = games[games["season"].isin(TRAIN_SEASONS)]
     test_df = games[games["season"] == TEST_SEASON]
     print(f"Train: {len(train_df)} games ({TRAIN_SEASONS[0]}-{TRAIN_SEASONS[-1]})")

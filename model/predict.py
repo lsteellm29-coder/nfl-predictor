@@ -21,6 +21,9 @@ from config import CURRENT_SEASON
 from data.fetch_injuries import fetch_current_injury_impact
 from data.fetch_week import fetch_week
 from data.fetch_weather import fetch_forecast
+from data.situational import (
+    away_travel_penalty, blowout_loss_flags, is_short_week, lookahead_flags,
+)
 from data.team_stats import build_rolling_team_stats, build_team_game_stats
 from model.elo import compute_elo_ratings
 from model.train import FEATURE_COLS, STAT_COLS, predict_proba
@@ -112,8 +115,28 @@ def get_game_wind_speed(game: pd.Series) -> float:
     return forecast["wind"] if forecast else 0.0
 
 
+def get_situational_flags(season: int, week: int) -> tuple[dict, dict]:
+    """(blowout_loss, lookahead) team -> flag dicts for the current season,
+    same logic as training (data.situational), applied to whatever's been
+    scheduled/played so far this season. A team with no prior game this
+    season yet (e.g. week 1) has no signal either way -- same as how the
+    historical version resets to 0 each new season, so this stays
+    consistent with what the model was trained on."""
+    schedule = nfl.import_schedules([season])
+    blowouts = blowout_loss_flags(schedule)
+    lookaheads = lookahead_flags(schedule)
+
+    blowout_now = blowouts[blowouts["week"] == week]
+    lookahead_now = lookaheads[lookaheads["week"] == week]
+    return (
+        dict(zip(blowout_now["team"], blowout_now["blowout_loss_last_game"])),
+        dict(zip(lookahead_now["team"], lookahead_now["lookahead_spot"])),
+    )
+
+
 def _build_features(
     game: pd.Series, stats: pd.DataFrame, injury_impact: dict, elo_ratings: dict,
+    blowout_flags: dict, lookahead_flags_: dict,
 ) -> dict | None:
     home, away = game["home_team"], game["away_team"]
     if home not in stats.index or away not in stats.index:
@@ -128,6 +151,12 @@ def _build_features(
     feat["injury_impact_diff"] = injury_impact.get(home, 0.0) - injury_impact.get(away, 0.0)
     feat["elo_diff"] = elo_ratings.get(home, 1500.0) - elo_ratings.get(away, 1500.0)
     feat["wind_speed"] = get_game_wind_speed(game)
+
+    feat["short_week_diff"] = int(is_short_week(game["home_rest"])) - int(is_short_week(game["away_rest"]))
+    feat["away_travel_penalty"] = -1 if away_travel_penalty(home, away, game.get("gametime")) else 0
+    feat["div_game"] = game.get("div_game", 0)
+    feat["blowout_loss_diff"] = blowout_flags.get(home, 0) - blowout_flags.get(away, 0)
+    feat["lookahead_diff"] = lookahead_flags_.get(home, 0) - lookahead_flags_.get(away, 0)
     return feat
 
 
@@ -311,6 +340,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     games = fetch_week(week, season)
     stats = get_pregame_stats(season, week)
     elo_ratings = get_current_elo_ratings(season)
+    blowout_flags, lookahead_flags_now = get_situational_flags(season, week)
 
     try:
         injury_impact = fetch_current_injury_impact()
@@ -333,7 +363,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
 
     rows = []
     for _, game in games.iterrows():
-        feat = _build_features(game, stats, injury_impact, elo_ratings)
+        feat = _build_features(game, stats, injury_impact, elo_ratings, blowout_flags, lookahead_flags_now)
         row = game.to_dict()
         row["wind_speed"] = feat["wind_speed"] if feat else get_game_wind_speed(game)
         row["home_td_scorer"] = get_td_scorer_prediction(
@@ -350,6 +380,10 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             row["away_stats"] = stats.loc[game["away_team"]].to_dict()
             row["away_stats"]["injury_impact"] = injury_impact.get(game["away_team"], 0.0)
             row["away_stats"]["elo"] = elo_ratings.get(game["away_team"], 1500.0)
+        row["home_blowout_loss"] = blowout_flags.get(game["home_team"], 0)
+        row["away_blowout_loss"] = blowout_flags.get(game["away_team"], 0)
+        row["home_lookahead"] = lookahead_flags_now.get(game["home_team"], 0)
+        row["away_lookahead"] = lookahead_flags_now.get(game["away_team"], 0)
         if feat is None:
             row["home_win_prob"] = None
             row["implied_spread"] = None
