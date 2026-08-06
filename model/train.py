@@ -60,7 +60,8 @@ STAT_COLS = [
     "off_yac_oe_avg", "def_yac_oe_avg",
 ]
 FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
-    "home_field_context_diff", "rest_diff", "injury_impact_diff", "elo_diff",
+    "home_field_context_diff", "rest_diff", "injury_impact_diff",
+    "off_elo_diff", "def_elo_diff",
     "wind_speed", "short_week_diff", "away_travel_penalty", "div_game",
     "blowout_loss_diff", "lookahead_diff",
 ]
@@ -111,10 +112,15 @@ def build_feature_frame(
     games["injury_impact_diff"] = games["home_injury_impact"] - games["away_injury_impact"]
 
     games = games.merge(
-        elo_per_game[["game_id", "home_elo_pre", "away_elo_pre"]],
+        elo_per_game[["game_id", "home_off_elo_pre", "home_def_elo_pre",
+                      "away_off_elo_pre", "away_def_elo_pre"]],
         on="game_id", how="left",
     )
-    games["elo_diff"] = games["home_elo_pre"] - games["away_elo_pre"]
+    # Home offense vs. away defense, and away offense vs. home defense,
+    # kept as two separate features rather than one blended rating -- see
+    # model/elo.py's docstring for why the split matters.
+    games["off_elo_diff"] = games["home_off_elo_pre"] - games["away_def_elo_pre"]
+    games["def_elo_diff"] = games["home_def_elo_pre"] - games["away_off_elo_pre"]
 
     # Wind is game-level, not team-relative -- both sides play in the same
     # conditions, so no home/away diff makes sense here. NaN (dome/closed

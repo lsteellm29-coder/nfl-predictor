@@ -72,11 +72,11 @@ def _fallback_stats(season: int) -> pd.DataFrame:
 
 
 def get_current_elo_ratings(season: int) -> dict:
-    """Each team's Elo rating as of right now, computed by replaying every
-    game from the start of the cached historical window through whatever's
-    been played of the current season so far -- Elo has to be run
-    continuously to mean anything, unlike the rolling stats which reset
-    each season.
+    """Each team's {"off", "def"} Elo ratings as of right now, computed by
+    replaying every game from the start of the cached historical window
+    through whatever's been played of the current season so far -- Elo has
+    to be run continuously to mean anything, unlike the rolling stats
+    which reset each season.
 
     The full current-season schedule (including future, unplayed games) is
     passed in, not filtered to a target week -- unplayed games never update
@@ -155,7 +155,10 @@ def _build_features(
     # A team with no key absent from the live injury feed just had nothing
     # worth listing -- 0 impact, not missing data.
     feat["injury_impact_diff"] = injury_impact.get(home, 0.0) - injury_impact.get(away, 0.0)
-    feat["elo_diff"] = elo_ratings.get(home, 1500.0) - elo_ratings.get(away, 1500.0)
+    home_elo = elo_ratings.get(home, {"off": 1500.0, "def": 1500.0})
+    away_elo = elo_ratings.get(away, {"off": 1500.0, "def": 1500.0})
+    feat["off_elo_diff"] = home_elo["off"] - away_elo["def"]
+    feat["def_elo_diff"] = home_elo["def"] - away_elo["off"]
     feat["wind_speed"] = get_game_wind_speed(game)
 
     feat["short_week_diff"] = int(is_short_week(game["home_rest"])) - int(is_short_week(game["away_rest"]))
@@ -422,14 +425,19 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         row["away_td_scorer"] = get_td_scorer_prediction(
             game["away_team"], game["home_team"], current_td_data, fallback_td_data,
             def_rates, league_avg_def_rate, implied_totals, league_avg_implied_total)
+        default_elo = {"off": 1500.0, "def": 1500.0}
         if game["home_team"] in stats.index:
             row["home_stats"] = stats.loc[game["home_team"]].to_dict()
             row["home_stats"]["injury_impact"] = injury_impact.get(game["home_team"], 0.0)
-            row["home_stats"]["elo"] = elo_ratings.get(game["home_team"], 1500.0)
+            home_elo = elo_ratings.get(game["home_team"], default_elo)
+            row["home_stats"]["off_elo"] = home_elo["off"]
+            row["home_stats"]["def_elo"] = home_elo["def"]
         if game["away_team"] in stats.index:
             row["away_stats"] = stats.loc[game["away_team"]].to_dict()
             row["away_stats"]["injury_impact"] = injury_impact.get(game["away_team"], 0.0)
-            row["away_stats"]["elo"] = elo_ratings.get(game["away_team"], 1500.0)
+            away_elo = elo_ratings.get(game["away_team"], default_elo)
+            row["away_stats"]["off_elo"] = away_elo["off"]
+            row["away_stats"]["def_elo"] = away_elo["def"]
         row["home_blowout_loss"] = blowout_flags.get(game["home_team"], 0)
         row["away_blowout_loss"] = blowout_flags.get(game["away_team"], 0)
         row["home_lookahead"] = lookahead_flags_now.get(game["home_team"], 0)
