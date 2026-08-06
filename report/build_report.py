@@ -89,11 +89,6 @@ TRANSITIONS = [
     "{other} does have a real case, though: ",
     "It's worth noting {other} counters with something too: ",
 ]
-TD_INTROS = [
-    "On the touchdown-scorer side: {away_scorer} leads the way for {away} (about a {away_prob:.0%} shot at finding the end zone based on recent scoring rate), while {home_scorer} projects as {home}'s likeliest scorer (roughly {home_prob:.0%}).",
-    "If you're watching anytime-TD markets, {home_scorer} has been {home}'s go-to scorer (~{home_prob:.0%} rate), and {away_scorer} has carried that role for {away} (~{away_prob:.0%}).",
-    "Up front on scoring: {away_scorer} has been the one finding paydirt most often for {away} (~{away_prob:.0%}), with {home_scorer} doing the same for {home} (~{home_prob:.0%}).",
-]
 EDGE_BIG = [
     "For context: sportsbooks currently have {vegas_side} favored by about {vegas_val:.1f} points, but based on the team stats above, this model thinks the game is closer to {model_side} by {model_val:.1f}. That gap is what's sometimes called an 'edge' -- a sign the model sees this matchup differently than the sportsbooks do, in {favored_poss} favor.",
     "Here's the interesting part: the market has this at {vegas_side} by {vegas_val:.1f}, while this model's own number comes out to {model_side} by {model_val:.1f}. That difference suggests the sportsbooks may be pricing this one a bit off from what the underlying numbers say, in {favored_poss} favor.",
@@ -340,44 +335,6 @@ def _cite_factor(feat: str, game: pd.Series, favored_abbr: str, other_abbr: str,
     return f"{favored_clause}, compared to {other}'s {other_val_str}"
 
 
-def _matchup_note(scorer: dict, scorer_team: str, opp_team: str) -> str | None:
-    """Names the specific matchup reason when the opposing defense or the
-    game's expected scoring environment moved a TD-scorer estimate
-    meaningfully off the player's own raw rate."""
-    def_factor, total_factor = scorer["def_factor"], scorer["total_factor"]
-    opp_full = _full_name(opp_team)
-    if def_factor > 1.1:
-        return f"{opp_full}'s defense has been giving up scores at an above-average rate, which helps here"
-    if def_factor < 0.9:
-        return f"{opp_full}'s defense has been stingy about letting anyone score, which works against this pick"
-    if total_factor > 1.1:
-        return f"this game's Vegas total points to a higher-scoring environment than usual, which helps here"
-    if total_factor < 0.9:
-        return "this game's Vegas total points to a lower-scoring environment than usual, which works against this pick"
-    return None
-
-
-def _td_sentence(game: pd.Series, seed: int) -> str | None:
-    home, away = game["home_team"], game["away_team"]
-    home_td, away_td = game.get("home_td_scorer"), game.get("away_td_scorer")
-    if not home_td or not away_td:
-        return None
-    template = _pick(TD_INTROS, seed, 2)
-    sentence = template.format(
-        home=_full_name(home), away=_full_name(away),
-        home_scorer=home_td["player"], away_scorer=away_td["player"],
-        home_prob=home_td["prob"], away_prob=away_td["prob"],
-    )
-
-    for scorer, scorer_team, opp_team in [(home_td, home, away), (away_td, away, home)]:
-        note = _matchup_note(scorer, scorer_team, opp_team)
-        if note:
-            sentence += f" Worth noting: {note}."
-            break  # one matchup callout is plenty; more starts to ramble
-
-    return sentence
-
-
 def _explain(game: pd.Series, winner: str) -> str:
     top_factors = game.get("top_factors")
     if not top_factors:
@@ -400,22 +357,15 @@ def _explain(game: pd.Series, winner: str) -> str:
             continue
         (winner_cites if side == winner else other_cites).append(cite)
 
-    sentences = [_pick(OPENERS, seed, 0).format(winner=winner_full, pct=f"{max(game['home_win_prob'], 1 - game['home_win_prob']) * 100:.0f}%")]
-
-    lead = game.get("lead_narrative")
-    if lead:
-        winner_coach = game.get("home_coach") if winner == home else game.get("away_coach")
-        sentences.append(phrase_lead_narrative(lead, winner, winner_coach, _full_name))
-
-    if winner_cites:
-        sentences.append(f"The biggest reasons why: {_join(winner_cites)}.")
-
-    if other_cites:
-        sentences.append(_pick(TRANSITIONS, seed, 1).format(other=other_full) + f"{_join(other_cites)}.")
-
-    td_sentence = _td_sentence(game, seed)
-    if td_sentence:
-        sentences.append(td_sentence)
+    # Phase 12 (v3 spec): a tight 3-4 sentence structure -- (1) context/
+    # stakes, (2) the model's own number + edge vs. Vegas, (3) the single
+    # best supporting reasoning (a narrative point if one cleanly backs
+    # the pick, otherwise the top stat factors), with a 4th only for a
+    # genuine counter-argument. TD-scorer detail is deliberately left out
+    # of this paragraph -- it's already shown in its own dedicated field
+    # in the report, so repeating it here would just eat into the budget.
+    sentences = [_pick(OPENERS, seed, 0).format(
+        winner=winner_full, pct=f"{max(game['home_win_prob'], 1 - game['home_win_prob']) * 100:.0f}%")]
 
     edge = game.get("edge")
     vegas = game.get("spread_line")
@@ -431,6 +381,16 @@ def _explain(game: pd.Series, winner: str) -> str:
         else:
             sentences.append(_pick(EDGE_SMALL, seed, 3).format(
                 vegas_side=vegas_side, vegas_val=abs(vegas), model_side=model_side, model_val=abs(model_spread)))
+
+    lead = game.get("lead_narrative")
+    if lead:
+        winner_coach = game.get("home_coach") if winner == home else game.get("away_coach")
+        sentences.append(phrase_lead_narrative(lead, winner, winner_coach, _full_name))
+    elif winner_cites:
+        sentences.append(f"The biggest reasons why: {_join(winner_cites)}.")
+
+    if len(sentences) < 4 and other_cites:
+        sentences.append(_pick(TRANSITIONS, seed, 1).format(other=other_full) + f"{_join(other_cites)}.")
 
     return " ".join(sentences)
 
