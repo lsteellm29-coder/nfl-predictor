@@ -46,6 +46,18 @@ STAT_COLS = [
     # redundant, and worth letting a regularized model weigh separately.
     "off_epa_per_play_adj_avg", "def_epa_per_play_adj_avg",
     "off_ypp_adj_avg", "def_ypp_adj_avg",
+    # Phase 4 (v3 spec): success rate and receiving-YAC-over-expected.
+    # data/team_stats.py also computes starting-QB-specific EPA/CPOE
+    # (qb_epa_per_play_avg, qb_cpoe_avg) but an ablation test showed it
+    # actively hurting 2025 holdout accuracy (0.625 -> 0.612 ensemble,
+    # cancelling out the real gains from the two features below) --
+    # likely collinear with off_epa_per_play_avg (QB dropbacks dominate
+    # team offensive EPA) plus real early-season CPOE noise (rolling
+    # averages swung as wide as -37 to +28 in the first couple of games).
+    # Left out of training rather than kept on faith; still computed and
+    # available in team_stats.parquet for narrative/props use.
+    "off_success_rate_avg", "def_success_rate_avg",
+    "off_yac_oe_avg", "def_yac_oe_avg",
 ]
 FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
     "home_field_context_diff", "rest_diff", "injury_impact_diff", "elo_diff",

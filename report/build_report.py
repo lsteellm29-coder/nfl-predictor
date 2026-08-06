@@ -66,6 +66,10 @@ FEATURE_INFO = {
     "def_epa_per_play_adj_avg_diff": (False, "{team}'s defense is allowing {v} EPA per play once you account for the offenses they've faced", "{:+.2f}"),
     "off_ypp_adj_avg_diff": (True, "{team} is picking up {v} yards per play on offense, adjusted for opponent strength", "{:.1f}"),
     "def_ypp_adj_avg_diff": (False, "{team} is allowing {v} yards per play on defense, adjusted for opponent strength", "{:.1f}"),
+    "off_success_rate_avg_diff": (True, "{team} is moving the chains on {v} of offensive plays", "{:.0%}"),
+    "def_success_rate_avg_diff": (False, "{team}'s defense is allowing a successful play {v} of the time", "{:.0%}"),
+    "off_yac_oe_avg_diff": (True, "{team}'s receivers are gaining {v} yards after the catch versus what's expected on those plays", "{:+.1f}"),
+    "def_yac_oe_avg_diff": (False, "{team}'s defense is allowing {v} yards after the catch above what's expected", "{:+.1f}"),
 }
 COMPARATORS = ["well ahead of", "clearly better than", "a step above"]
 

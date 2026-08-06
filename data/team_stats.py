@@ -25,7 +25,17 @@ def _offense_game_stats(pbp: pd.DataFrame) -> pd.DataFrame:
     epa_ypp = snaps.groupby(["game_id", "posteam"]).agg(
         off_epa_per_play=("epa", "mean"),
         off_ypp=("yards_gained", "mean"),
+        # nflfastR's own success flag (>=40%/60%/100% of yards-to-go
+        # gained on 1st/2nd/3rd-4th down) -- % of plays that moved the
+        # chains "enough," which a single EPA average can mask (a few
+        # explosive plays can carry a good EPA average on an otherwise
+        # inconsistent, series-killing offense).
+        off_success_rate=("success", "mean"),
     )
+
+    catches = snaps[(snaps["complete_pass"] == 1) & snaps["xyac_mean_yardage"].notna()].copy()
+    catches["yac_oe"] = catches["yards_after_catch"] - catches["xyac_mean_yardage"]
+    yac_oe = catches.groupby(["game_id", "posteam"])["yac_oe"].mean().rename("off_yac_oe")
 
     third = pbp[(pbp["down"] == 3) & pbp["posteam"].notna()]
     third_down = third.groupby(["game_id", "posteam"]).agg(
@@ -64,6 +74,7 @@ def _offense_game_stats(pbp: pd.DataFrame) -> pd.DataFrame:
     out = epa_ypp.join(third_down[["off_third_down_pct"]], how="outer")
     out = out.join(turnovers, how="outer")
     out = out.join(rz[["red_zone_td_pct"]], how="outer")
+    out = out.join(yac_oe, how="outer")
     return out.reset_index().rename(columns={"posteam": "team"})
 
 
@@ -74,7 +85,12 @@ def _defense_game_stats(pbp: pd.DataFrame) -> pd.DataFrame:
     epa_ypp = snaps.groupby(["game_id", "defteam"]).agg(
         def_epa_per_play=("epa", "mean"),
         def_ypp=("yards_gained", "mean"),
+        def_success_rate=("success", "mean"),
     )
+
+    catches = snaps[(snaps["complete_pass"] == 1) & snaps["xyac_mean_yardage"].notna()].copy()
+    catches["yac_oe"] = catches["yards_after_catch"] - catches["xyac_mean_yardage"]
+    def_yac_oe = catches.groupby(["game_id", "defteam"])["yac_oe"].mean().rename("def_yac_oe")
 
     third = pbp[(pbp["down"] == 3) & pbp["defteam"].notna()]
     third_down = third.groupby(["game_id", "defteam"]).agg(
@@ -97,7 +113,31 @@ def _defense_game_stats(pbp: pd.DataFrame) -> pd.DataFrame:
 
     out = epa_ypp.join(third_down[["def_third_down_pct"]], how="outer")
     out = out.join(turnovers, how="outer")
+    out = out.join(def_yac_oe, how="outer")
     return out.reset_index().rename(columns={"defteam": "team"})
+
+
+def _qb_game_stats(pbp: pd.DataFrame, schedules: pd.DataFrame) -> pd.DataFrame:
+    """Per (game_id, team) EPA/dropback and CPOE for *that game's starting
+    QB only* (per the schedule's home_qb_id/away_qb_id), not the team's
+    blended offensive average -- isolates the passer's own efficiency from
+    rushing production, other skill players, and any garbage-time
+    backup-QB relief snaps, none of which this feature is meant to
+    capture."""
+    reg = schedules[schedules["game_type"] == "REG"]
+    home_qb = reg.rename(columns={"home_team": "team", "home_qb_id": "starter_id"})[
+        ["game_id", "team", "starter_id"]]
+    away_qb = reg.rename(columns={"away_team": "team", "away_qb_id": "starter_id"})[
+        ["game_id", "team", "starter_id"]]
+    starters = pd.concat([home_qb, away_qb], ignore_index=True)
+
+    dropbacks = pbp[(pbp["qb_dropback"] == 1) & pbp["passer_player_id"].notna()]
+    dropbacks = dropbacks.merge(starters, left_on=["game_id", "posteam"], right_on=["game_id", "team"])
+    starter_plays = dropbacks[dropbacks["passer_player_id"] == dropbacks["starter_id"]]
+
+    return starter_plays.groupby(["game_id", "team"]).agg(
+        qb_epa_per_play=("epa", "mean"), qb_cpoe=("cpoe", "mean"),
+    ).reset_index()
 
 
 def build_team_game_stats(schedules: pd.DataFrame, pbp: pd.DataFrame) -> pd.DataFrame:
@@ -137,8 +177,10 @@ def build_team_game_stats(schedules: pd.DataFrame, pbp: pd.DataFrame) -> pd.Data
 
     off = _offense_game_stats(pbp)
     dfn = _defense_game_stats(pbp)
+    qb = _qb_game_stats(pbp, schedules)
     games = games.merge(off, on=["game_id", "team"], how="left")
     games = games.merge(dfn, on=["game_id", "team"], how="left")
+    games = games.merge(qb, on=["game_id", "team"], how="left")
 
     games["turnover_diff"] = games["turnovers_forced"] - games["turnovers_committed"]
 
@@ -149,6 +191,14 @@ ROLLING_SEASON_COLS = [
     "points_for", "points_against", "off_epa_per_play", "def_epa_per_play",
     "off_ypp", "def_ypp", "off_third_down_pct", "def_third_down_pct",
     "turnover_diff", "red_zone_td_pct",
+    # Phase 4 (v3 spec): success rate, receiving-YAC-over-expected, and
+    # starting-QB-specific EPA/CPOE. True rush-yards-over-expected (RYOE)
+    # needs a NextGenStats-style expected-rushing-yards model that isn't
+    # part of nflfastR's standard play-by-play, so it's left out here
+    # rather than faked with a weaker proxy -- the spec's own "if
+    # available" already anticipated this gap.
+    "off_success_rate", "def_success_rate", "off_yac_oe", "def_yac_oe",
+    "qb_epa_per_play", "qb_cpoe",
 ]
 
 
