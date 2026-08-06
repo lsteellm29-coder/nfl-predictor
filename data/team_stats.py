@@ -117,6 +117,24 @@ def _defense_game_stats(pbp: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index().rename(columns={"defteam": "team"})
 
 
+def _special_teams_game_stats(pbp: pd.DataFrame) -> pd.DataFrame:
+    """Per (game_id, team) special-teams EPA -- field goals, punts, and
+    kickoffs, from the kicking/punting team's own perspective (pbp's
+    posteam convention for these play types). EPA already distance- and
+    situation-adjusts field goals (a made 50-yarder is worth more than a
+    made 30-yarder, a missed 50-yarder costs less than a missed 30-yarder)
+    and already prices in field position on punts/kickoffs, so this
+    doesn't need a hand-built kicker-distance model or a separate
+    return-value calculation -- coverage quality is already baked into a
+    below-average (for the kicking team) or above-average punt/kickoff
+    EPA."""
+    st = pbp[pbp["play_type"].isin(["field_goal", "punt", "kickoff"]) & pbp["posteam"].notna()]
+    return (
+        st.groupby(["game_id", "posteam"])["epa"].mean()
+        .rename("special_teams_epa").reset_index().rename(columns={"posteam": "team"})
+    )
+
+
 def _qb_game_stats(pbp: pd.DataFrame, schedules: pd.DataFrame) -> pd.DataFrame:
     """Per (game_id, team) EPA/dropback and CPOE for *that game's starting
     QB only* (per the schedule's home_qb_id/away_qb_id), not the team's
@@ -178,9 +196,11 @@ def build_team_game_stats(schedules: pd.DataFrame, pbp: pd.DataFrame) -> pd.Data
     off = _offense_game_stats(pbp)
     dfn = _defense_game_stats(pbp)
     qb = _qb_game_stats(pbp, schedules)
+    st = _special_teams_game_stats(pbp)
     games = games.merge(off, on=["game_id", "team"], how="left")
     games = games.merge(dfn, on=["game_id", "team"], how="left")
     games = games.merge(qb, on=["game_id", "team"], how="left")
+    games = games.merge(st, on=["game_id", "team"], how="left")
 
     games["turnover_diff"] = games["turnovers_forced"] - games["turnovers_committed"]
 
@@ -199,6 +219,8 @@ ROLLING_SEASON_COLS = [
     # available" already anticipated this gap.
     "off_success_rate", "def_success_rate", "off_yac_oe", "def_yac_oe",
     "qb_epa_per_play", "qb_cpoe",
+    # Phase 10 (v3 spec): special-teams EPA (field goals, punts, kickoffs).
+    "special_teams_epa",
 ]
 
 
