@@ -22,6 +22,7 @@ from report.logos import get_logo_url
 from report.narrative import phrase_lead_narrative
 from report.news_section import NEWS_STYLE, news_section_html
 from report.props import props_section_html
+from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE, game_anchor, td_chip_parts
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "model.joblib")
@@ -121,63 +122,50 @@ def _full_name(abbr: str) -> str:
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>NFL Week {week} Predictions -- {season}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SharpLine -- NFL Week {week} Predictions</title>
+<meta name="description" content="Accuracy-first NFL predictions -- real win probabilities, real edges against the market, and player props built from the same model.">
+<meta property="og:title" content="SharpLine -- NFL Week {week} Predictions">
+<meta property="og:description" content="Accuracy-first NFL predictions -- real win probabilities, real edges against the market, and player props built from the same model.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="{og_image_url}">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%230D0D0D'/%3E%3Ctext x='50' y='69' font-family='Georgia,serif' font-size='58' font-weight='700' fill='%23D4AF37' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
 <style>
-  body {{ font-family: 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif; background: #ffffff; color: #1c1c1e; margin: 0; padding: 32px; font-size: 17px; }}
-  h1 {{ font-size: 30px; margin-bottom: 24px; font-weight: 700; }}
-  h2 {{ font-size: 18px; text-transform: uppercase; letter-spacing: 0.04em; color: #555; margin: 40px 0 16px; border-bottom: 2px solid #e5e5e5; padding-bottom: 10px; font-weight: 700; }}
-  .game {{ background: #fafafa; border: 1px solid #e2e2e2; border-radius: 14px; padding: 26px 30px; margin-bottom: 22px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }}
-  .top-row {{ display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }}
-  .matchup {{ display: flex; align-items: center; gap: 16px; font-size: 24px; font-weight: 700; }}
-  .matchup img {{ height: 52px; width: 52px; object-fit: contain; }}
-  .coaches {{ font-size: 15px; color: #777; margin-top: 4px; }}
-  .kickoff {{ font-size: 15px; color: #777; }}
-  .stats {{ display: flex; gap: 26px; font-size: 16px; color: #333; margin-top: 18px; flex-wrap: wrap; }}
-  .stats b {{ color: #111; }}
-  .winner {{ font-weight: 700; color: #1e7d34; }}
-  .edge-pos {{ color: #1e7d34; }}
-  .edge-neg {{ color: #c62828; }}
-  .edge-flat {{ color: #777; }}
-  .why {{ font-size: 16.5px; color: #333; margin-top: 18px; line-height: 1.65; }}
-  .caveat {{ font-size: 14px; color: #888; margin: -12px 0 28px; max-width: 720px; line-height: 1.5; }}
+{theme_style}
 {cards_style}
 {news_style}</style>
 </head>
 <body>
-<h1>NFL Week {week} Predictions -- {season}</h1>
-<div class="caveat">This {model_type} model backtested at {test_accuracy} accuracy on the {test_season} season (vs. {baseline_accuracy} for always picking the home team) -- a real edge, but far from certain. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Player props (where posted) use each player's own season rate, adjusted for the opponent's defense-by-position stats and current injury status, against a normal or Poisson distribution depending on the stat. Every "Higher/Lower" and team button below is colored to match what the model actually calculated, not dressed up for effect -- a thin edge shows as a thin edge. Treat all of this as informed estimates, not guarantees.</div>
-{news_section}
-{days}
+<div class="wrap">
+  <div class="masthead">
+    <div class="wordmark">SharpLine</div>
+    <div class="eyebrow">NFL &middot; Week {week} &middot; {season} Season</div>
+  </div>
+  <div class="intro">Accuracy-first NFL predictions -- real win probabilities, real edges against the market, and player props built from the same model, never dressed up for effect. No betting advice, just the numbers.</div>
+
+  <div class="statline">
+    <div class="stat"><div class="num">{test_accuracy}</div><div class="label">Model accuracy, {test_season} backtest</div></div>
+    <div class="stat"><div class="num">{baseline_accuracy}</div><div class="label">Always-home baseline</div></div>
+    <div class="stat"><div class="num">{n_games}</div><div class="label">Games this week</div></div>
+  </div>
+
+  <div class="caveat">{model_type_article} {model_type} model trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record), Elo ratings, injury reports, and weather, versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Player props (where posted) use each player's own season rate, adjusted for the opponent's defense-by-position stats and current injury status, against a normal or Poisson distribution depending on the stat. Every "Higher/Lower" and team button below is colored to match what the model actually calculated, not dressed up for effect -- a thin edge shows as a thin edge. Informed estimates, not guarantees.</div>
+
+  {news_section}
+  {days}
+
+  <footer>
+    Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
+  </footer>
+</div>
 <script>{cards_script}</script>
 </body>
 </html>
 """
-
-DAY_TEMPLATE = """<h2>{day_header}</h2>
-{games}"""
-
-GAME_TEMPLATE = """<div class="game">
-  <div class="top-row">
-    <div>
-      <div class="matchup">
-        <img src="{away_logo}" alt="{away_team}"> {away_full} @ {home_full}
-        <img src="{home_logo}" alt="{home_team}">
-      </div>
-      <div class="coaches">{coaches}</div>
-    </div>
-    <div class="kickoff">{kickoff}</div>
-  </div>
-  {game_pick_card}
-  <div class="stats">
-    <div>Likely TD scorer ({away_team}): <b>{away_td_scorer}</b></div>
-    <div>Likely TD scorer ({home_team}): <b>{home_td_scorer}</b></div>
-  </div>
-  <div class="why">{why}</div>
-  {props_section}
-</div>"""
 
 
 def _fmt_kickoff(gameday, gametime, weekday) -> str:
@@ -457,6 +445,8 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
 
     home_full, away_full = _full_name(game["home_team"]), _full_name(game["away_team"])
     kickoff = _fmt_kickoff(game.get("gameday"), game.get("gametime"), game.get("weekday"))
+    away_td_pct, away_td_name = td_chip_parts(game.get("away_td_scorer"))
+    home_td_pct, home_td_name = td_chip_parts(game.get("home_td_scorer"))
 
     return {
         "away_team": game["away_team"],
@@ -467,6 +457,7 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
         "home_logo": get_logo_url(game["home_team"]),
         "coaches": _coach_qb_line(game),
         "kickoff": kickoff,
+        "anchor": game_anchor(game),
         "winner": winner,
         "win_pct": win_pct_str,
         "spread_line": _fmt_spread(game.get("spread_line")),
@@ -477,6 +468,10 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
         "edge_class": edge_class,
         "away_td_scorer": _fmt_td_scorer(game.get("away_td_scorer")),
         "home_td_scorer": _fmt_td_scorer(game.get("home_td_scorer")),
+        "away_td_pct": away_td_pct,
+        "away_td_name": away_td_name,
+        "home_td_pct": home_td_pct,
+        "home_td_name": home_td_name,
         "why": why,
         "game_pick_card": game_pick_card,
         "props_section": props_section_html(
@@ -525,18 +520,27 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
                        news: list[dict] | None = None) -> str:
     days_html = []
     for day, weekday, day_games in _by_day(predictions):
-        games_html = "\n".join(GAME_TEMPLATE.format(**_row_data(g, props)) for _, g in day_games.iterrows())
-        days_html.append(DAY_TEMPLATE.format(day_header=_day_header(day, weekday), games=games_html))
+        games_html = "\n".join(GAME_BLOCK.format(**_row_data(g, props)) for _, g in day_games.iterrows())
+        days_html.append(DAY_BLOCK.format(day_header=_day_header(day, weekday), games=games_html))
 
     metrics = _model_metrics()
+    # "xgboost" is read aloud as "ex-gee-boost" (vowel sound) same as
+    # "ensemble" -- only "logistic" actually wants "a", not "an" (same
+    # rule build_artifact.py's build() uses for the identical sentence).
+    model_type_article = "An" if metrics["model_type"] in ("ensemble", "xgboost") else "A"
     return HTML_TEMPLATE.format(
-        week=week, season=season, days="\n".join(days_html),
-        cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
+        week=week, season=season, n_games=len(predictions), days="\n".join(days_html),
+        theme_style=THEME_STYLE, cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
-        model_type=metrics["model_type"],
-        test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "an unknown",
-        baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "an unknown",
-        test_season=metrics["test_season"] or "the most recent",
+        # Static branding asset (report/assets/social_preview.png, built
+        # once via a one-off Pillow script, not regenerated per-run --
+        # nothing in it is week-specific), referenced by its path relative
+        # to this file's own output location (report/output/*.html).
+        og_image_url="../assets/social_preview.png",
+        model_type=metrics["model_type"], model_type_article=model_type_article,
+        test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
+        baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "N/A",
+        test_season=metrics["test_season"] or "recent",
     )
 
 

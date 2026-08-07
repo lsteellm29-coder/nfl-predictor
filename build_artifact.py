@@ -1,9 +1,16 @@
 """Renders the weekly report as a fully self-contained HTML page (all logos +
-the display font embedded as data URIs) for publishing as a shareable
-Artifact -- Artifacts block remote network requests, so external image/font
-URLs would just show as broken. Defaults to the current week; re-run weekly
-(see the scheduled task set up alongside this) to keep an already-published
-Artifact URL current.
+display fonts embedded as data URIs) for publishing as a shareable Artifact --
+Artifacts block remote network requests, so external image/font URLs would
+just show as broken. Defaults to the current week; re-run weekly (see the
+scheduled task set up alongside this) to keep an already-published Artifact
+URL current.
+
+SharpLine Visual Design Overhaul spec: black/gold dark-first design system
+(this file + report/build_report.py + report/cards.py + report/news_section.py
+all pull from the same CSS custom-property tokens, so a palette change here
+is one edit, not per-page restyling), a homepage-style hero + scannable grid
+ahead of the existing per-game detail sections, motion/hover polish, and a
+mobile-first pass.
 """
 
 import argparse
@@ -23,16 +30,14 @@ from data.fetch_news import fetch_news
 from model.player_stats import score_props
 from model.predict import score_week
 from report.build_report import _by_day, _day_header, _model_metrics, _row_data
-from report.cards import CARDS_SCRIPT, CARDS_STYLE
+from report.cards import CARDS_SCRIPT, CARDS_STYLE, confidence_tier
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
 from report.news_section import NEWS_STYLE, news_section_html
+from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE
 from run_week import get_current_week
 
 ASSETS_DIR = os.path.join(ROOT_DIR, "report", "assets")
 OUTPUT_DIR = os.path.join(ROOT_DIR, "report", "output")
-
-with open(os.path.join(ASSETS_DIR, "fonts", "oswald-700.woff2"), "rb") as f:
-    OSWALD_B64 = base64.b64encode(f.read()).decode()
 
 
 def _load_logo_data_uris() -> dict:
@@ -66,291 +71,117 @@ PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NFL Week {week} Picks -- {season}</title>
+<title>SharpLine -- NFL Week {week} Picks</title>
 <style>
-@font-face {{
-  font-family: 'Oswald';
-  font-style: normal;
-  font-weight: 700;
-  src: url(data:font/woff2;base64,{oswald_b64}) format('woff2');
-}}
+{theme_style}
 
-:root {{
-  --paper: #F4F5F8;
-  --surface: #FFFFFF;
-  --ink: #171A21;
-  --muted: #666E7D;
-  --border: #E1E4EA;
-  --accent: #A8710F;
-  --accent-soft: #FBF0DC;
-  --positive: #2A7A4F;
-  --positive-soft: #E7F5EC;
-  --negative: #B23A3A;
-  --negative-soft: #FBEAEA;
-  --warning: #8A6D00;
-  --warning-soft: #FFF6D9;
-  --edge-glow: transparent;
+/* ---- hero: the week's biggest edge ---- */
+.hero {{
+  background: linear-gradient(165deg, var(--surface-raised), var(--surface));
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 26px 26px 22px;
+  margin-bottom: 12px;
+  box-shadow: var(--shadow);
 }}
-@media (prefers-color-scheme: dark) {{
-  :root {{
-    --paper: #0A0D13;
-    --surface: #12151C;
-    --ink: #E9EBF0;
-    --muted: #8A93A6;
-    --border: #232733;
-    --accent: #E3A63F;
-    --accent-soft: #2A2214;
-    --positive: #4FBE81;
-    --positive-soft: #12261B;
-    --negative: #E0716D;
-    --negative-soft: #2A1414;
-    --warning: #E8C547;
-    --warning-soft: #2E2810;
-  }}
-}}
-:root[data-theme="dark"] {{
-  --paper: #0A0D13;
-  --surface: #12151C;
-  --ink: #E9EBF0;
-  --muted: #8A93A6;
-  --border: #232733;
-  --accent: #E3A63F;
-  --accent-soft: #2A2214;
-  --positive: #4FBE81;
-  --positive-soft: #12261B;
-  --negative: #E0716D;
-  --negative-soft: #2A1414;
-  --warning: #E8C547;
-  --warning-soft: #2E2810;
-}}
-:root[data-theme="light"] {{
-  --paper: #F4F5F8;
-  --surface: #FFFFFF;
-  --ink: #171A21;
-  --muted: #666E7D;
-  --border: #E1E4EA;
-  --accent: #A8710F;
-  --accent-soft: #FBF0DC;
-  --positive: #2A7A4F;
-  --positive-soft: #E7F5EC;
-  --negative: #B23A3A;
-  --negative-soft: #FBEAEA;
-  --warning: #8A6D00;
-  --warning-soft: #FFF6D9;
-}}
-
-* {{ box-sizing: border-box; }}
-html, body {{ margin: 0; padding: 0; }}
-body {{
-  background: var(--paper);
-  color: var(--ink);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  font-size: 16.5px;
-  line-height: 1.6;
-}}
-.wrap {{ max-width: 780px; margin: 0 auto; padding: 40px 20px 80px; }}
-
-.masthead {{ margin-bottom: 8px; }}
-.eyebrow {{
+.hero-tag {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-family: 'Oswald', sans-serif;
-  font-size: 13px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent);
+  font-size: 11.5px;
   font-weight: 700;
-}}
-h1 {{
-  font-family: 'Oswald', sans-serif;
-  font-weight: 700;
-  font-size: clamp(34px, 7vw, 52px);
-  letter-spacing: 0.01em;
-  text-transform: uppercase;
-  margin: 4px 0 18px;
-  text-wrap: balance;
-}}
-
-.statline {{
-  display: flex;
-  gap: 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 36px;
-}}
-.statline .stat {{
-  flex: 1;
-  padding: 14px 16px;
-  border-right: 1px solid var(--border);
-}}
-.statline .stat:last-child {{ border-right: none; }}
-.statline .stat .num {{
-  font-family: 'Oswald', sans-serif;
-  font-weight: 700;
-  font-size: 26px;
-  font-variant-numeric: tabular-nums;
-}}
-.statline .stat .label {{
-  font-size: 12px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-top: 2px;
-}}
-
-.caveat {{
-  font-size: 13.5px;
-  color: var(--muted);
-  max-width: 62ch;
-  line-height: 1.55;
-  margin-bottom: 44px;
-}}
-
-.day {{
-  font-family: 'Oswald', sans-serif;
-  font-weight: 700;
-  font-size: 14px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--muted);
-  margin: 44px 0 16px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border);
-}}
-.day:first-of-type {{ margin-top: 0; }}
-
-.game {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 22px 24px;
-  margin-bottom: 18px;
-}}
-
-.matchup-row {{
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  flex-wrap: wrap;
-}}
-.teams {{
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}}
-.teams img {{ height: 46px; width: 46px; object-fit: contain; flex-shrink: 0; }}
-.teams .names {{
-  font-family: 'Oswald', sans-serif;
-  font-weight: 700;
-  font-size: 19px;
-  letter-spacing: 0.01em;
-}}
-.kickoff {{
-  font-size: 13px;
-  color: var(--muted);
-  text-align: right;
-  white-space: nowrap;
-}}
-.subline {{
-  font-size: 13px;
-  color: var(--muted);
-  margin-top: 6px;
-}}
-
-.confidence {{
-  margin-top: 16px;
-}}
-.confidence .track {{
-  height: 7px;
-  border-radius: 4px;
-  background: var(--border);
-  overflow: hidden;
-}}
-.confidence .fill {{
-  height: 100%;
+  color: var(--paper);
   background: var(--accent);
-  border-radius: 4px;
+  border-radius: 999px;
+  padding: 4px 11px;
+  margin-bottom: 14px;
 }}
-.confidence .caption {{
-  display: flex;
-  justify-content: space-between;
-  font-size: 12.5px;
-  color: var(--muted);
-  margin-top: 5px;
-  font-variant-numeric: tabular-nums;
-}}
-.confidence .caption b {{ color: var(--ink); font-weight: 600; }}
+.hero .matchup-row {{ margin-top: 4px; }}
+.hero .teams img {{ height: 56px; width: 56px; }}
+.hero .teams .names {{ font-size: 23px; }}
 
-.tiles {{
+/* ---- quick-scan grid (homepage overview) ---- */
+.grid-overview {{
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
-  gap: 1px;
-  background: var(--border);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  margin-top: 16px;
-  overflow: hidden;
-}}
-.tile {{
-  background: var(--surface);
-  padding: 10px 12px;
-}}
-.tile .label {{
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-}}
-.tile .value {{
-  font-family: 'Oswald', sans-serif;
-  font-weight: 700;
-  font-size: 17px;
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-}}
-.tile.edge-pos {{ background: var(--positive-soft); }}
-.tile.edge-pos .value {{ color: var(--positive); }}
-.tile.edge-neg {{ background: var(--negative-soft); }}
-.tile.edge-neg .value {{ color: var(--negative); }}
-
-.tdwatch {{
-  margin-top: 16px;
-  display: flex;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   gap: 10px;
-  flex-wrap: wrap;
+  margin-bottom: 8px;
 }}
-.chip {{
+.grid-item {{
+  display: block;
+  text-decoration: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  box-shadow: var(--shadow);
+}}
+.grid-item-teams {{
   display: flex;
   align-items: center;
   gap: 8px;
-  background: var(--accent-soft);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 6px 12px 6px 8px;
-  font-size: 13px;
-}}
-.chip .pct {{
   font-family: 'Oswald', sans-serif;
   font-weight: 700;
-  color: var(--accent);
-  font-variant-numeric: tabular-nums;
+  font-size: 14.5px;
 }}
-.chip .team {{ color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }}
+.grid-item-teams img {{ height: 26px; width: 26px; object-fit: contain; flex-shrink: 0; }}
+.grid-item-at {{ color: var(--muted); font-weight: 400; font-size: 12px; }}
+.grid-item-kickoff {{ font-size: 11.5px; color: var(--muted); margin-top: 6px; }}
+.grid-item-pick {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 9px;
+  border-radius: 999px;
+  margin-top: 10px;
+  border: 1px solid var(--border);
+}}
+.grid-item-pick.pick-strong-home, .grid-item-pick.pick-strong-away {{ background: var(--positive-soft); border-color: var(--positive); color: var(--positive); }}
+.grid-item-pick.pick-toss-up {{ background: var(--warning-soft); border-color: var(--warning); color: var(--warning); }}
+.grid-item-pick .dot {{ width: 6px; height: 6px; border-radius: 50%; background: currentColor; }}
 
-.why {{
-  margin-top: 16px;
-  font-size: 15.5px;
-  line-height: 1.68;
-  max-width: 68ch;
-  color: var(--ink);
+/* ---- Artifact-only mobile overrides: the homepage grid/hero don't exist
+   in report/build_report.py's plain report, so these stay local rather
+   than living in THEME_STYLE's shared mobile block. ---- */
+@media (max-width: 640px) {{
+  .grid-overview {{ grid-template-columns: 1fr; }}
+  .hero .teams img {{ height: 42px; width: 42px; }}
+  .hero .teams .names {{ font-size: 18px; }}
 }}
 
-footer {{
-  margin-top: 56px;
-  padding-top: 20px;
+.bottom-nav {{
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  display: none;
+  justify-content: space-around;
+  align-items: center;
+  background: var(--surface);
   border-top: 1px solid var(--border);
-  font-size: 12.5px;
+  padding: 10px max(10px, env(safe-area-inset-left)) calc(10px + env(safe-area-inset-bottom));
+  z-index: 10;
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.35);
+}}
+.bottom-nav a {{
+  font-family: 'Oswald', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-decoration: none;
   color: var(--muted);
-  line-height: 1.6;
+  text-align: center;
+  padding: 6px 10px;
+  min-width: 44px;
+}}
+.bottom-nav a.is-accent {{ color: var(--accent); }}
+@media (max-width: 640px) {{
+  .bottom-nav {{ display: flex; }}
+  .wrap {{ padding-bottom: 96px; }}
 }}
 {cards_style}
 {news_style}</style>
@@ -358,9 +189,10 @@ footer {{
 <body>
 <div class="wrap">
   <div class="masthead">
-    <div class="eyebrow">NFL &middot; {season} Season</div>
-    <h1>Week {week} Picks</h1>
+    <div class="wordmark">SharpLine</div>
+    <div class="eyebrow">NFL &middot; Week {week} &middot; {season} Season</div>
   </div>
+  <div class="intro">Accuracy-first NFL predictions -- real win probabilities, real edges against the market, and player props built from the same model, never dressed up for effect. No betting advice, just the numbers.</div>
 
   <div class="statline">
     <div class="stat"><div class="num">{test_accuracy}</div><div class="label">Model accuracy, {test_season} backtest</div></div>
@@ -372,21 +204,32 @@ footer {{
 
   {news_section}
 
+  {hero_section}
+
+  <div class="section-head" id="slate"><span class="accent">&#9679;</span> This Week's Slate</div>
+  <div class="grid-overview">
+    {grid_items}
+  </div>
+
+  <div class="section-head" id="games">Full Breakdown, Game by Game</div>
   {days}
 
   <footer>
     Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
   </footer>
 </div>
+<nav class="bottom-nav">
+  <a href="#top">Top</a>
+  <a href="#slate" class="is-accent">Slate</a>
+  <a href="#games">Games</a>
+</nav>
 <script>{cards_script}</script>
 </body>
 </html>
 """
 
-DAY_BLOCK = """<div class="day">{day_header}</div>
-{games}"""
-
-GAME_BLOCK = """<div class="game">
+HERO_BLOCK = """<div class="hero" id="hero">
+  <span class="hero-tag">&#9733; Sharpest Edge This Week</span>
   <div class="matchup-row">
     <div class="teams">
       <img src="{away_logo}" alt="{away_team}">
@@ -406,13 +249,30 @@ GAME_BLOCK = """<div class="game">
 
   <div class="why">{why}</div>
   {props_section}
+  <div class="subline" style="margin-top:14px;"><a href="#games" style="color: var(--accent);">Jump to the full slate &#8595;</a></div>
 </div>"""
 
+GRID_ITEM = """<a class="grid-item" href="#{anchor}">
+  <div class="grid-item-teams">
+    <img src="{away_logo}" alt="{away_team}"><span>{away_team}</span>
+    <span class="grid-item-at">@</span>
+    <img src="{home_logo}" alt="{home_team}"><span>{home_team}</span>
+  </div>
+  <div class="grid-item-kickoff">{kickoff_short}</div>
+  <div class="grid-item-pick {pick_class}"><span class="dot"></span>{pick_label}</div>
+</a>"""
 
-def td_chip_parts(pred):
-    if not pred:
-        return "--", "no data"
-    return f"{pred['prob'] * 100:.0f}%", pred["player"]
+
+def _pick_grid_class_and_label(game) -> tuple[str, str]:
+    home_prob = game.get("home_win_prob")
+    if home_prob is None or pd.isna(home_prob):
+        return "pick-toss-up", "No line yet"
+    home_favored = home_prob >= 0.5
+    prob_for_favored = home_prob if home_favored else 1 - home_prob
+    tier, _ = confidence_tier(prob_for_favored)
+    team = game["home_team"] if home_favored else game["away_team"]
+    css_class = "pick-toss-up" if tier == "toss-up" else f"pick-strong-{'home' if home_favored else 'away'}"
+    return css_class, f"{team} {prob_for_favored * 100:.0f}%"
 
 
 def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
@@ -428,25 +288,63 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         print(f"Warning: couldn't fetch live news ({e}); publishing without it.")
         news = None
 
+    def row_dict(game) -> dict:
+        # headshot_url_fn=None: external images can't load in a self-
+        # contained Artifact. logo_url_fn=embed: the team-logo fallback
+        # (QA spec Section 3) uses the same base64-embedded logos already
+        # loaded for the game header, so it stays fully self-contained too.
+        # anchor/TD-chip fields come straight from _row_data() now (shared
+        # with report/build_report.py's identical GAME_BLOCK rendering);
+        # only the logo URLs need overriding here to the embedded data URIs.
+        d = _row_data(game, props, headshot_url_fn=None, logo_url_fn=embed)
+        d["away_logo"] = embed(game["away_team"])
+        d["home_logo"] = embed(game["home_team"])
+        return d
+
+    # Hero game logic: whichever game has the biggest edge (the model's
+    # own implied spread vs. the market's) -- falling back to raw win-
+    # probability confidence for the handful of games with no market
+    # line posted yet, since |edge| is undefined without one. This is
+    # the "accuracy first" identity from the spec: the hero is whichever
+    # game the model disagrees with the market on the most, not
+    # whichever matchup has the biggest names.
+    def hero_score(game) -> float:
+        edge = game.get("edge")
+        if edge is not None and pd.notna(edge):
+            return abs(edge)
+        prob = game.get("home_win_prob")
+        return abs(prob - 0.5) if prob is not None and pd.notna(prob) else -1.0
+
+    hero_game = None
+    if not predictions.empty:
+        scores = predictions.apply(hero_score, axis=1)
+        if scores.max() > -1.0:
+            hero_game = predictions.loc[scores.idxmax()]
+
+    hero_section = ""
+    if hero_game is not None:
+        hero_section = HERO_BLOCK.format(**row_dict(hero_game))
+
+    grid_items = []
     days_html = []
     for day, weekday, day_games in _by_day(predictions):
         game_htmls = []
         for _, game in day_games.iterrows():
-            # headshot_url_fn=None: external images can't load in a
-            # self-contained Artifact. logo_url_fn=embed: the team-logo
-            # fallback (QA spec Section 3) uses the same base64-embedded
-            # logos already loaded for the game header, so it stays fully
-            # self-contained too.
-            d = _row_data(game, props, headshot_url_fn=None, logo_url_fn=embed)
-            d["away_logo"] = embed(game["away_team"])
-            d["home_logo"] = embed(game["home_team"])
-            away_td_pct, away_td_name = td_chip_parts(game.get("away_td_scorer"))
-            home_td_pct, home_td_name = td_chip_parts(game.get("home_td_scorer"))
-            game_htmls.append(GAME_BLOCK.format(
-                **d, away_td_pct=away_td_pct, away_td_name=away_td_name,
-                home_td_pct=home_td_pct, home_td_name=home_td_name,
+            d = row_dict(game)
+            game_htmls.append(GAME_BLOCK.format(**d))
+            pick_class, pick_label = _pick_grid_class_and_label(game)
+            grid_items.append(GRID_ITEM.format(
+                anchor=d["anchor"], away_logo=d["away_logo"], home_logo=d["home_logo"],
+                away_team=game["away_team"], home_team=game["home_team"],
+                kickoff_short=d["kickoff"].split("-- ")[-1] if "-- " in d["kickoff"] else d["kickoff"],
+                pick_class=pick_class, pick_label=pick_label,
             ))
         days_html.append(DAY_BLOCK.format(day_header=_day_header(day, weekday), games="\n".join(game_htmls)))
+
+    if not grid_items:
+        grid_items_html = '<div class="empty-state">No games on the board yet -- check back closer to the week.</div>'
+    else:
+        grid_items_html = "\n".join(grid_items)
 
     metrics = _model_metrics()
     # "xgboost" is read aloud as "ex-gee-boost" (vowel sound) same as
@@ -454,9 +352,10 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     model_type_article = "An" if metrics["model_type"] in ("ensemble", "xgboost") else "A"
     html = PAGE.format(
         week=week, season=season, n_games=n_games,
-        days="\n".join(days_html), oswald_b64=OSWALD_B64,
+        days="\n".join(days_html), theme_style=THEME_STYLE,
         cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
+        hero_section=hero_section, grid_items=grid_items_html,
         model_type=metrics["model_type"], model_type_article=model_type_article,
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
         baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "N/A",

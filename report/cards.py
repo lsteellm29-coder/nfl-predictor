@@ -84,9 +84,17 @@ CARDS_STYLE = """
 .pcard, .gcard { background: var(--surface, #fff); border: 1px solid var(--border, #E1E4EA); border-radius: 10px;
   padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .pcard-head { display: flex; align-items: center; gap: 10px; }
-.pcard-photo { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: var(--border, #E1E4EA); flex-shrink: 0; }
-.pcard-photo.is-fallback { display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; color: var(--muted, #666E7D); }
-.pcard-photo.is-logo-fallback { object-fit: contain; padding: 6px; background: var(--paper, #F4F5F8); border: 1px solid var(--border, #E1E4EA); }
+/* Headshots are real <img src> fetches against ESPN's CDN (report/build_report.py's
+   plain report only -- the Artifact build has no network headshots to wait
+   on), so this is a genuine loading moment, not a fabricated one: the
+   shimmer is the img element's own background, which the decoded photo
+   paints over the instant it loads -- no JS, no fake-async delay. */
+.pcard-photo { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; flex-shrink: 0;
+  background: linear-gradient(100deg, var(--border, #E1E4EA) 30%, var(--surface-raised, #F4F5F8) 50%, var(--border, #E1E4EA) 70%);
+  background-size: 200% 100%; animation: pcard-shimmer 1.5s ease-in-out infinite; }
+.pcard-photo.is-fallback { animation: none; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; color: var(--muted, #666E7D); background: var(--border, #E1E4EA); }
+.pcard-photo.is-logo-fallback { animation: none; object-fit: contain; padding: 6px; background: var(--paper, #F4F5F8); border: 1px solid var(--border, #E1E4EA); }
+@keyframes pcard-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .pcard-name { font-weight: 700; font-size: 14.5px; color: var(--ink, #171A21); line-height: 1.25; }
 .pcard-meta { font-size: 12px; color: var(--muted, #666E7D); }
 .pcard-stat { font-family: 'Oswald', sans-serif; font-weight: 700; font-size: 15px; color: var(--ink, #171A21); }
@@ -365,4 +373,57 @@ document.addEventListener('click', function (e) {
     });
   }
 });
+
+// Progressive-enhancement height animation for <details> (props dropdown,
+// model-reasoning disclosure) -- native <details> toggles instantly with
+// no transition hook, so this measures the content height and animates it
+// on open/close. Falls back to the plain instant native toggle if
+// anything here throws. Shared by every HTML output (build_artifact.py,
+// report/build_report.py) via this script, since both render the same
+// <details class="card-section">/<details class="card-detail"> markup.
+(function () {
+  function animate(details) {
+    // Every card-section/card-detail in this codebase wraps its whole
+    // body in exactly one child element after <summary> (.news-feed,
+    // .props-panel, .card-detail-body) -- targeting "any non-summary
+    // child" instead of hardcoding those class names means this keeps
+    // working if a new disclosure type is added later without a
+    // matching JS update.
+    var body = details.querySelector(':scope > :not(summary)');
+    if (!body) return;
+    var summary = details.querySelector(':scope > summary');
+    if (!summary || summary.dataset.animated) return;
+    summary.dataset.animated = '1';
+    summary.addEventListener('click', function (e) {
+      e.preventDefault();
+      var isOpen = details.hasAttribute('open');
+      if (isOpen) {
+        var h = body.scrollHeight;
+        body.style.maxHeight = h + 'px';
+        requestAnimationFrame(function () {
+          body.style.transition = 'max-height 200ms ease';
+          body.style.maxHeight = '0px';
+        });
+        setTimeout(function () {
+          details.removeAttribute('open');
+          body.style.maxHeight = '';
+          body.style.transition = '';
+        }, 200);
+      } else {
+        details.setAttribute('open', '');
+        var h2 = body.scrollHeight;
+        body.style.maxHeight = '0px';
+        requestAnimationFrame(function () {
+          body.style.transition = 'max-height 200ms ease';
+          body.style.maxHeight = h2 + 'px';
+        });
+        setTimeout(function () {
+          body.style.maxHeight = '';
+          body.style.transition = '';
+        }, 220);
+      }
+    });
+  }
+  document.querySelectorAll('details').forEach(animate);
+})();
 """

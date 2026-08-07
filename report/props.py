@@ -13,7 +13,7 @@ from report.cards import prop_card_html, prop_filter_bar_html
 
 SECTION_TEMPLATE = """<details class="card-section">
   <summary>Player Props</summary>
-  {body}
+  <div class="props-panel">{body}</div>
 </details>"""
 
 
