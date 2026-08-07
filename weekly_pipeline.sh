@@ -1,16 +1,19 @@
 #!/bin/bash
-# Wednesday automation: refresh data, retrain, run the calibration audit,
-# validate roster/injury-ID/coverage/headshot data quality, score the
-# current week, and publish the artifact -- in that order, so a retrain
-# always gets audited before its picks get published (Phase 6), and every
-# QA gate from the Player Props QA & Data Integrity spec (plus the Audit
-# Fix Plan's Step 2 injury-ID check) runs before anything gets published.
-# `set -e` below means any qa.* script that sys.exit(1)s halts the whole
-# run -- validate_rosters and validate_coverage are the two that actually
-# can; validate_injury_ids and validate_headshots never do (both degrade
-# gracefully -- a missing espn_id just means no injury discount for that
-# player's prop, a missing photo falls back to a team logo -- so both are
-# logged, not blocking).
+# Wednesday automation: refresh data, retrain both the win-probability and
+# anytime-TD models, run both calibration audits, validate roster/injury-
+# ID/coverage/headshot data quality, score the current week, and publish
+# the artifact -- in that order, so a retrain always gets audited before
+# its picks get published (Phase 6), and every QA gate from the Player
+# Props QA & Data Integrity spec (plus the Audit Fix Plan's Step 2
+# injury-ID check) runs before anything gets published. The TD ensemble
+# classifier (model/td_ensemble.py) retrains right after its own backtest
+# so it's always fit on the walk-forward data currently on disk, never a
+# stale prior run's. `set -e` below means any qa.* script that
+# sys.exit(1)s halts the whole run -- validate_rosters and
+# validate_coverage are the two that actually can; validate_injury_ids
+# and validate_headshots never do (both degrade gracefully -- a missing
+# espn_id just means no injury discount for that player's prop, a missing
+# photo falls back to a team logo -- so both are logged, not blocking).
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -32,6 +35,15 @@ LOG_FILE="$LOG_DIR/$(date +%Y%m%d_%H%M%S).log"
 
   echo "=== $(date) : calibration audit ==="
   python -m model.calibration
+
+  echo "=== $(date) : anytime-TD walk-forward backtest ==="
+  python -m model.td_backtest
+
+  echo "=== $(date) : retraining anytime-TD ensemble classifier ==="
+  python -m model.td_ensemble
+
+  echo "=== $(date) : anytime-TD calibration audit ==="
+  python -m model.td_calibration
 
   echo "=== $(date) : roster validation (hard-fail on stale/empty roster data) ==="
   python -m qa.validate_rosters

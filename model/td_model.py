@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import poisson
 
+from model.td_ensemble import blend_with_classifier
+
 RED_ZONE_YARDLINE = 20
 GOAL_LINE_YARDLINE = 5
 
@@ -341,11 +343,28 @@ def project_td_probability_live(team: str, opponent: str, player_id: str, positi
     by the caller (model/player_stats.py's score_props()) -- team-level
     aggregates need less granularity than the strict per-player
     min-games gate red-zone SHARE needs, matching model/predict.py's
-    get_pregame_stats()'s own team-level current-else-fallback merge."""
+    get_pregame_stats()'s own team-level current-else-fallback merge.
+
+    Blends in model/td_ensemble.py's trained logistic classifier here,
+    not inside _project_from_share_row -- project_td_probability (the
+    backtest entry point) deliberately stays pure-Poisson, a clean,
+    stable baseline metric to re-check the core model against later,
+    rather than measuring a moving target that includes whatever
+    classifier happens to be currently saved. Falls back to the plain
+    Poisson probability untouched if no classifier has been trained yet."""
     current_share, fallback_share = touch_share
     found = lookup_touch_share(current_share, fallback_share, team, player_id)
     if found is None:
         return None
     row, team_total = found
-    return _project_from_share_row(row, team_total, team, opponent, position,
-                                    team_rz_touches, team_rz_defense, baseline_rates, league_avg_rz_td_rate)
+    result = _project_from_share_row(row, team_total, team, opponent, position,
+                                      team_rz_touches, team_rz_defense, baseline_rates, league_avg_rz_td_rate)
+    if result is None:
+        return None
+    result["prob"] = blend_with_classifier(result["prob"], {
+        "expected_tds": result["expected_tds"], "player_share": result["player_share"],
+        "player_conversion": result["player_conversion"], "def_factor": result["def_factor"],
+        "team_rz_touches_per_game": result["team_rz_touches_per_game"], "n_games": result["n_games"],
+        "position": position,
+    })
+    return result

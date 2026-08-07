@@ -113,6 +113,14 @@ def run_season_backtest(pbp: pd.DataFrame, schedule: pd.DataFrame, pos_map: dict
                 "season": season, "week": week, "team": team, "player_id": player_id, "position": position,
                 "predicted_prob": result["prob"], "actual_td": int((team, player_id) in scorers),
                 "n_games": result["n_games"],
+                # Underlying components, not just the final Poisson
+                # probability -- lets a downstream consumer (e.g. an
+                # ensembled classifier, model/td_calibration.py's own
+                # ablations) train on the same real signal without
+                # duplicating this module's projection math.
+                "expected_tds": result["expected_tds"], "player_share": result["player_share"],
+                "player_conversion": result["player_conversion"], "def_factor": result["def_factor"],
+                "team_rz_touches_per_game": result["team_rz_touches_per_game"],
             })
 
     return pd.DataFrame(rows)
@@ -141,8 +149,15 @@ def run_walk_forward_backtest(seasons: list[int]) -> pd.DataFrame:
 
 def main():
     import argparse
+
+    from config import HISTORICAL_SEASONS
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seasons", type=int, nargs="+", default=[2022, 2023, 2024, 2025])
+    # Last 4 of the cached historical seasons by default -- derived from
+    # config.py's HISTORICAL_SEASONS (itself relative to CURRENT_SEASON)
+    # rather than a hardcoded [2022, 2023, 2024, 2025], so this doesn't
+    # quietly go stale as CURRENT_SEASON advances in future years.
+    parser.add_argument("--seasons", type=int, nargs="+", default=HISTORICAL_SEASONS[-4:])
     args = parser.parse_args()
 
     results = run_walk_forward_backtest(args.seasons)
