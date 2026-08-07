@@ -128,7 +128,52 @@ def cross_check_with_balldontlie(roster: pd.DataFrame) -> list[str]:
     return lines
 
 
-def run(season: int = CURRENT_SEASON) -> bool:
+def cross_check_with_ourlads(roster: pd.DataFrame) -> list[str]:
+    """Cross-references nfl_data_py's roster against ourlads.com's own
+    independently-maintained depth charts (data/fetch_firecrawl_sources.py,
+    MCP Integration spec) -- another genuine second source, same spirit
+    as cross_check_with_balldontlie: two independently-maintained sources
+    disagreeing about who's on a team is a much stronger signal than
+    either source's own season-over-season churn. Flags a depth-chart
+    player nfl_data_py's roster doesn't have anywhere on that team at
+    all -- name-format differences between the two sources (nicknames,
+    suffixes) mean some false positives are expected here, same
+    tolerance the balldontlie check already accepts; this is informational,
+    never a hard-fail, and a Firecrawl outage/rate-limit/missing API key
+    degrades to "skipped" rather than blocking the run."""
+    try:
+        from data.fetch_firecrawl_sources import TEAM_NEWS_URLS, cross_check_depth_chart
+    except Exception as e:
+        return [f"ourlads.com cross-check skipped ({type(e).__name__}: {e})"]
+
+    names_by_team: dict[str, set] = {}
+    for team, names in roster.groupby("team")["player_name"]:
+        names_by_team[team] = set(names)
+
+    all_flags = []
+    checked_teams = 0
+    for team in TEAM_NEWS_URLS:
+        if team not in names_by_team:
+            continue
+        try:
+            flags = cross_check_depth_chart(team, names_by_team[team])
+        except Exception as e:
+            all_flags.append(f"  - {team}: cross-check failed ({type(e).__name__}: {e})")
+            continue
+        checked_teams += 1
+        all_flags.extend(f"  - {f}" for f in flags)
+
+    if checked_teams == 0:
+        return ["ourlads.com cross-check: no teams could be checked -- skipped"]
+    lines = [f"ourlads.com depth-chart cross-check: {checked_teams} team(s) checked, "
+             f"{len(all_flags)} discrepancy flag(s)."]
+    lines.extend(all_flags[:20])
+    if len(all_flags) > 20:
+        lines.append(f"  ...and {len(all_flags) - 20} more")
+    return lines
+
+
+def run(season: int = CURRENT_SEASON, check_ourlads: bool = True) -> bool:
     """Returns True if safe to proceed. Always overwrites the snapshot
     with this pull (even on failure) so next week's diff compares against
     the most recent real data, not a stale baseline."""
@@ -149,6 +194,13 @@ def run(season: int = CURRENT_SEASON) -> bool:
     if not roster.empty:
         for line in cross_check_with_balldontlie(roster):
             print(line)
+        # 32 sequential Firecrawl calls, rate-limited to 11/min on the
+        # free tier -- real but bounded time cost (a few minutes) for a
+        # weekly job, so on by default; check_ourlads=False is there for
+        # a quick local test run that shouldn't wait on it.
+        if check_ourlads:
+            for line in cross_check_with_ourlads(roster):
+                print(line)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     if not roster.empty:

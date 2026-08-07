@@ -14,6 +14,22 @@
 # and validate_headshots never do (both degrade gracefully -- a missing
 # espn_id just means no injury discount for that player's prop, a missing
 # photo falls back to a team logo -- so both are logged, not blocking).
+#
+# MCP Integration spec (Firecrawl/Hugging Face/Playwright): two steps
+# below now do real extra work with no separate script needed, since both
+# are on-by-default parameters of functions this pipeline already calls.
+# qa.validate_rosters's run() also cross-checks nfl_data_py's roster
+# against ourlads.com's independently-maintained depth charts (32
+# Firecrawl calls, rate-limited to 11/min on the free tier -- adds a few
+# real minutes here); run_week.py's news fetch also scrapes team-specific
+# beat news via Firecrawl (32 more calls, same rate limit). Both degrade
+# gracefully to their existing pre-Firecrawl behavior if the API key is
+# missing/invalid or the service is down. Hugging Face's zero-shot
+# classifier (model/nlp_classifier.py) is opt-in, not called by this
+# pipeline by default -- see data/fetch_news.py's classify() docstring
+# for why. Playwright (data/fetch_playwright_sources.py) isn't called by
+# this pipeline at all -- built and tested, not currently needed by any
+# source here (see that module's own docstring).
 set -euo pipefail
 
 cd "$(dirname "$0")"

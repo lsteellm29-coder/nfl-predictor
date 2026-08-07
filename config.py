@@ -8,6 +8,7 @@ load_dotenv()
 
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
 BALLDONTLIE_API_KEY = os.environ.get("BALLDONTLIE_API_KEY")
+FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY")
 
 CURRENT_SEASON = 2026
 

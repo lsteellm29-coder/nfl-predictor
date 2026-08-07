@@ -94,22 +94,57 @@ def _extract_tags(article: dict) -> tuple[list[str], list[str]]:
     return teams, athlete_ids
 
 
-def classify(headline: str, description: str | None) -> str | None:
+# model/nlp_classifier.py's zero-shot labels -> this module's own
+# category vocabulary, for classify()'s optional NLP fallback below.
+_NLP_LABEL_TO_CATEGORY = {
+    "injury": "injury", "suspension": "suspension", "lineup change": "lineup",
+    "trade or roster move": "trade", "coaching news": "coaching",
+}
+# A headline classify_headline() itself can't confidently place doesn't
+# get force-categorized -- empirically, a real test case ("Ravens Sign
+# Zay Flowers to Contract Extension") came back as "lineup change" at
+# 32% with "general commentary" right behind at 29%, a coin flip the
+# keyword matcher would have called correctly and decisively via its own
+# "trade" pattern. Below this bar, "not confident enough" is treated the
+# same as "no match" rather than trusting a near-tied top label.
+_NLP_MIN_CONFIDENCE = 0.5
+
+
+def classify(headline: str, description: str | None, use_nlp_fallback: bool = False) -> str | None:
     """Best-matching category (injury/lineup/trade/coaching), or None if
     this headline doesn't look relevant to any of them -- general
-    commentary, previews, recaps, etc. all correctly classify as None."""
+    commentary, previews, recaps, etc. all correctly classify as None.
+
+    use_nlp_fallback (off by default) reaches for
+    model/nlp_classifier.py's Hugging Face zero-shot model when the fast
+    keyword matcher finds nothing -- extends real coverage to headlines
+    that don't happen to use one of CATEGORY_KEYWORDS' known phrases, at
+    the cost of a real model-load + inference delay per call. The
+    keyword matcher stays primary rather than being replaced outright:
+    it's demonstrably more precise for the phrasing it's tuned to catch
+    (it's what actually flagged the real Saints-suspension case ahead of
+    the official injury report this session), and MCP Integration spec
+    Section 3's own goal -- catching what a fixed keyword list misses --
+    is best served by using the model on the residual, not re-deciding
+    cases already handled well."""
     text = f"{headline} {description or ''}"
     for category in ("injury", "suspension", "lineup", "trade", "coaching"):
         if CATEGORY_PATTERNS[category].search(text):
             return category
-    return None
+    if not use_nlp_fallback:
+        return None
+    from model.nlp_classifier import classify_headline
+    result = classify_headline(text)
+    if result["score"] < _NLP_MIN_CONFIDENCE:
+        return None
+    return _NLP_LABEL_TO_CATEGORY.get(result["label"])
 
 
-def parse_articles(articles: list[dict]) -> list[dict]:
+def parse_articles(articles: list[dict], use_nlp_fallback: bool = False) -> list[dict]:
     rows = []
     for a in articles:
         teams, athlete_ids = _extract_tags(a)
-        category = classify(a.get("headline", ""), a.get("description"))
+        category = classify(a.get("headline", ""), a.get("description"), use_nlp_fallback)
         rows.append({
             "id": a.get("id"),
             "headline": a.get("headline"),
@@ -124,10 +159,35 @@ def parse_articles(articles: list[dict]) -> list[dict]:
     return rows
 
 
-def fetch_news(limit: int = 50) -> list[dict]:
+def fetch_news(limit: int = 50, include_team_news: bool = True, use_nlp_fallback: bool = False) -> list[dict]:
     """Every recent NFL headline, tagged and classified -- see this
-    module's docstring: informational only, never a direct model input."""
-    return parse_articles(fetch_raw_news(limit))
+    module's docstring: informational only, never a direct model input.
+
+    include_team_news adds data/fetch_firecrawl_sources.py's per-team
+    beat coverage (MCP Integration spec) on top of ESPN's national feed
+    -- wrapped in its own try/except so a Firecrawl outage, rate limit,
+    or missing API key degrades to ESPN-only instead of breaking the
+    whole news pipeline, same fail-open contract every other optional
+    enhancement in this codebase already follows (injury fetch, live
+    odds, etc.).
+
+    use_nlp_fallback (off by default -- see classify()) applies Hugging
+    Face zero-shot classification to whatever ESPN headlines the keyword
+    matcher didn't categorize; NOT applied to team-news articles below,
+    since those are already reclassified with the exact same keyword
+    matcher inside fetch_all_team_news() and adding a second, slower
+    pass across potentially hundreds of scraped headlines would be a
+    real time cost for a marginal gain this module doesn't currently
+    have evidence justifies -- opt in explicitly if that tradeoff is
+    ever worth it for a specific run."""
+    articles = parse_articles(fetch_raw_news(limit), use_nlp_fallback)
+    if include_team_news:
+        try:
+            from data.fetch_firecrawl_sources import fetch_all_team_news
+            articles.extend(fetch_all_team_news())
+        except Exception as e:
+            print(f"fetch_news: couldn't fetch team-specific news via Firecrawl ({e}); ESPN feed only.")
+    return articles
 
 
 def cross_check_against_injuries(articles: list[dict], current_injury_status: dict, espn_to_gsis: dict) -> list[dict]:
