@@ -20,16 +20,21 @@ STAT_LABEL = {
 }
 GROUP_LABEL = {"WR": "wide receivers", "TE": "tight ends", "RB": "running backs", "RUSH": "the ground game"}
 
-# Reuses model/calibration.py's own confidence-bucket boundaries (0.55,
-# 0.65) rather than inventing new ones, so "Strong lean" here means the
-# same thing it means everywhere else this model talks about confidence.
-def confidence_label(prob: float) -> str:
-    edge = abs(prob - 0.5)
-    if edge >= 0.15:
-        return "Strong lean"
-    if edge >= 0.05:
-        return "Lean"
-    return "Slight lean"
+# Three-tier confidence system (QA spec): 50-59% on the favored side is
+# a toss-up regardless of which way it leans -- yellow, not green/red --
+# since a coin-flip-ish edge dressed up in a decisive color is exactly
+# the confidence inflation this whole card system is built to avoid.
+# 60%+ is treated as the model's real, actionable call.
+CONFIDENCE_THRESHOLD = 0.60
+
+
+def confidence_tier(prob: float) -> tuple[str, str]:
+    """prob: the model's probability for whichever side is being colored
+    (always >=0.5 by construction -- confidence is only ever shown on the
+    side the model actually favors). Returns (css class suffix, label)."""
+    if prob >= CONFIDENCE_THRESHOLD:
+        return "strong", f"Model favors {prob * 100:.0f}%"
+    return "toss-up", "Toss-up"
 
 
 # Real definitions, not simplified ones -- matches how each term is
@@ -81,6 +86,7 @@ CARDS_STYLE = """
 .pcard-head { display: flex; align-items: center; gap: 10px; }
 .pcard-photo { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: var(--border, #E1E4EA); flex-shrink: 0; }
 .pcard-photo.is-fallback { display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; color: var(--muted, #666E7D); }
+.pcard-photo.is-logo-fallback { object-fit: contain; padding: 6px; background: var(--paper, #F4F5F8); border: 1px solid var(--border, #E1E4EA); }
 .pcard-name { font-weight: 700; font-size: 14.5px; color: var(--ink, #171A21); line-height: 1.25; }
 .pcard-meta { font-size: 12px; color: var(--muted, #666E7D); }
 .pcard-stat { font-family: 'Oswald', sans-serif; font-weight: 700; font-size: 15px; color: var(--ink, #171A21); }
@@ -93,6 +99,8 @@ CARDS_STYLE = """
 .split-side .side-conf { display: block; font-size: 10.5px; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.03em; }
 .split-side.side-over { background: var(--positive-soft, #E7F5EC); border-color: var(--positive, #2A7A4F); color: var(--positive, #2A7A4F); }
 .split-side.side-under { background: var(--negative-soft, #FBEAEA); border-color: var(--negative, #B23A3A); color: var(--negative, #B23A3A); }
+.split-side.side-toss-up { background: var(--warning-soft, #FFF6D9); border-color: var(--warning, #8A6D00); color: var(--warning, #8A6D00); }
+.no-line-badge { font-size: 12px; color: var(--muted, #666E7D); background: var(--paper, #F4F5F8); border: 1px dashed var(--border, #E1E4EA); border-radius: 8px; padding: 8px 10px; text-align: center; }
 
 .card-detail summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--accent, #A8710F); list-style: none; }
 .card-detail summary::-webkit-details-marker { display: none; }
@@ -136,11 +144,16 @@ def reasoning_sentence(reasoning: dict | None, opponent_full: str) -> str | None
     phrase = _rank_phrase(reasoning["rank"])
     group = reasoning.get("group")
     if reasoning["kind"] == "yards":
-        label = "passing yards allowed" if group is None else (
-            "rushing yards allowed to backs" if group == "RUSH" else f"yards allowed to {GROUP_LABEL[group]}")
+        what = "passing yards" if group is None else (
+            "rushing yards to running backs" if group == "RUSH" else f"yards to {GROUP_LABEL[group]}")
     else:
-        label = "rushing TD rate allowed" if group == "RUSH" else f"TD rate allowed to {GROUP_LABEL[group]}"
-    return f"Facing {opponent_full}, allowing {phrase} {label} in the league this season."
+        what = "rushing TD rate" if group == "RUSH" else f"TD rate to {GROUP_LABEL[group]}"
+    # "whose defense allows" (not "allowing... allowed") -- the original
+    # phrasing doubled up on "allow" once `what` already ended in
+    # "allowed", which read as a grammar error, not just informal.
+    # `phrase` already starts with "the" (_rank_phrase), so it isn't
+    # repeated here.
+    return f"Facing {opponent_full}, whose defense allows {phrase} {what} in the league this season."
 
 
 def _initials(name: str) -> str:
@@ -150,10 +163,26 @@ def _initials(name: str) -> str:
     return name[:2].upper() if name else "??"
 
 
-def _headshot_html(player: str, espn_id, headshot_url_fn) -> str:
-    url = headshot_url_fn(espn_id) if headshot_url_fn and espn_id else None
-    if url:
-        return f'<img class="pcard-photo" src="{html.escape(url)}" alt="{html.escape(player)}" loading="lazy">'
+def _headshot_html(player: str, team: str, espn_id, headshot_url_fn, logo_url_fn=None) -> str:
+    """Fallback chain (QA spec Section 3): real headshot -> team logo
+    placeholder -> initials, so a card is never blank or visibly broken.
+    The headshot-to-logo step happens via the image's own onerror handler
+    rather than a pre-flight network check per card -- lets the browser
+    itself find out in real time whether ESPN's CDN actually has a photo,
+    with zero added latency in the common case where it does. Proactively
+    flagging *known* gaps before publishing is qa/validate_headshots.py's
+    job, a separate concern from this runtime fallback."""
+    headshot_url = headshot_url_fn(espn_id) if headshot_url_fn and espn_id else None
+    logo_url = logo_url_fn(team) if logo_url_fn else None
+
+    if headshot_url and logo_url:
+        onerror = f"this.onerror=null;this.src='{html.escape(logo_url)}';this.classList.add('is-logo-fallback');"
+        return (f'<img class="pcard-photo" src="{html.escape(headshot_url)}" alt="{html.escape(player)}" '
+                f'loading="lazy" onerror="{onerror}">')
+    if logo_url:
+        return f'<img class="pcard-photo is-logo-fallback" src="{html.escape(logo_url)}" alt="{html.escape(player)}" loading="lazy">'
+    if headshot_url:
+        return f'<img class="pcard-photo" src="{html.escape(headshot_url)}" alt="{html.escape(player)}" loading="lazy">'
     return f'<div class="pcard-photo is-fallback">{html.escape(_initials(player))}</div>'
 
 
@@ -173,29 +202,65 @@ def _fmt_projection(stat: str, value: float) -> str:
 
 
 def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
-                    opponent_full: str, headshot_url_fn=None) -> str:
+                    opponent_full: str, headshot_url_fn=None, logo_url_fn=None) -> str:
     """One player-prop card. `row` is a dict from model/player_stats.py's
     score_props() (plus `home_full`/`away_full`/`kickoff`/`opponent_full`
     resolved by the caller, since score_props() only carries abbreviations).
-    `headshot_url_fn` resolves an espn_id to an image URL -- pass None (the
-    self-contained Artifact build) to always fall back to an initials
-    avatar, since external images won't load there."""
+    `headshot_url_fn` resolves an espn_id to an image URL (None in the
+    Artifact build, which can't load external images) -- when it can't
+    produce one, or the resulting image 404s in the browser,
+    `logo_url_fn` (team abbr -> logo URL/data-URI) is the next fallback
+    before initials."""
+    has_line = row.get("has_line", True)
     is_td = row["stat"] == "anytime_td"
     over_label, under_label = ("Yes", "No") if is_td else ("Higher", "Lower")
-    model_prob = row["model_over_prob"]
-    is_over = model_prob >= 0.5
-    conf = confidence_label(model_prob if is_over else 1 - model_prob)
 
-    pct = f"{(model_prob if is_over else 1 - model_prob) * 100:.0f}%"
-    over_class = "side-over" if is_over else ""
-    under_class = "side-under" if not is_over else ""
-    over_conf = f'<span class="side-conf">{pct} &middot; {conf}</span>' if is_over else ""
-    under_conf = f'<span class="side-conf">{pct} &middot; {conf}</span>' if not is_over else ""
+    if has_line:
+        model_prob = row["model_over_prob"]
+        is_over = model_prob >= 0.5
+        tier, conf = confidence_tier(model_prob if is_over else 1 - model_prob)
+        # "strong" keeps the direction-specific color (green for
+        # Higher/Yes, red for Lower/No); "toss-up" is the same yellow
+        # regardless of which way it barely leans, since below 60% isn't
+        # a real enough call to earn a directional color.
+        over_class = "side-toss-up" if tier == "toss-up" else ("side-over" if is_over else "")
+        under_class = "side-toss-up" if tier == "toss-up" else ("side-under" if not is_over else "")
+        over_conf = f'<span class="side-conf">{conf}</span>' if is_over else ""
+        under_conf = f'<span class="side-conf">{conf}</span>' if not is_over else ""
+        stat_line = f"{_fmt_line(row['stat'], row['line'])} {STAT_LABEL.get(row['stat'], row['stat'])}"
+        split_html = (
+            '<div class="split">'
+            f'<div class="split-side {over_class}"><span class="side-label">{over_label}</span>{over_conf}</div>'
+            f'<div class="split-side {under_class}"><span class="side-label">{under_label}</span>{under_conf}</div>'
+            '</div>'
+        )
+        # Anytime-TD props have no real over/under number (`line` is an
+        # internal 0.5 placeholder, not something a sportsbook posts) --
+        # showing it here as "Vegas: Yes" said nothing about what the
+        # market actually thinks, so this shows the market's own implied
+        # probability instead, the same number `edge` is computed from.
+        vegas_val = f"{row['market_over_prob'] * 100:.0f}%" if is_td else _fmt_line(row["stat"], row["line"])
+        vs_row = (f'<div class="vs-row"><span>{info_icon("Model Projection")}: '
+                  f'<b>{_fmt_projection(row["stat"], row["projection"])}</b></span>'
+                  f'<span>Vegas: <b>{vegas_val}</b></span></div>')
+    else:
+        # QA spec Section 2: the sportsbook hasn't priced this player yet,
+        # but they're required lineup coverage -- show the model's own
+        # number plainly instead of omitting them, with no Higher/Lower
+        # toggle (there's no line to be over/under) and no confidence
+        # color, since there's nothing from the market to measure an edge
+        # against.
+        stat_line = f"{STAT_LABEL.get(row['stat'], row['stat'])} -- No line available"
+        split_html = '<div class="no-line-badge">No line available -- showing model projection only</div>'
+        vs_row = (f'<div class="vs-row"><span>{info_icon("Model Projection")}: '
+                  f'<b>{_fmt_projection(row["stat"], row["projection"])}</b></span></div>')
 
     reasoning = reasoning_sentence(row.get("reasoning"), opponent_full)
     injury_html = ""
     if row.get("injury_status") and str(row["injury_status"]) != "nan":
-        injury_html = f'<div class="card-injury">{html.escape(row["player"])} is listed as {html.escape(str(row["injury_status"]))} -- usage projection adjusted accordingly.</div>'
+        injury_html = (f'<div class="card-injury">{html.escape(row["player"])} is listed as '
+                        f'{html.escape(str(row["injury_status"]))} -- the projection above already '
+                        f'accounts for reduced usage, so it\'s not just a raw season average.</div>')
 
     detail_lines = []
     if reasoning:
@@ -204,22 +269,19 @@ def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
 
     return f"""<div class="pcard" data-team="{row['team']}" data-pos="{row.get('position') or ''}" data-stat="{row['stat']}">
   <div class="pcard-head">
-    {_headshot_html(row['player'], row.get('espn_id'), headshot_url_fn)}
+    {_headshot_html(row['player'], row['team'], row.get('espn_id'), headshot_url_fn, logo_url_fn)}
     <div>
       <div class="pcard-name">{html.escape(row['player'])}</div>
       <div class="pcard-meta">{row['team']} &middot; {row.get('position') or '--'}</div>
     </div>
   </div>
-  <div class="pcard-stat">{_fmt_line(row['stat'], row['line'])} {STAT_LABEL.get(row['stat'], row['stat'])}</div>
+  <div class="pcard-stat">{stat_line}</div>
   <div class="pcard-matchup">{away_full} @ {home_full} &middot; {kickoff}</div>
-  <div class="split">
-    <div class="split-side {over_class}"><span class="side-label">{over_label}</span>{over_conf}</div>
-    <div class="split-side {under_class}"><span class="side-label">{under_label}</span>{under_conf}</div>
-  </div>
+  {split_html}
   <details class="card-detail">
     <summary>Model reasoning</summary>
     <div class="card-detail-body">
-      <div class="vs-row"><span>{info_icon('Model Projection')}: <b>{_fmt_projection(row['stat'], row['projection'])}</b></span><span>Vegas: <b>{_fmt_line(row['stat'], row['line'])}</b></span></div>
+      {vs_row}
       {''.join(detail_lines)}
     </div>
   </details>
@@ -257,12 +319,11 @@ def game_pick_card_html(game: dict, home_full: str, away_full: str) -> str:
     if home_prob is None or pd.isna(home_prob):
         return ""
     home_favored = home_prob >= 0.5
-    conf = confidence_label(home_prob if home_favored else 1 - home_prob)
-    pct = f"{(home_prob if home_favored else 1 - home_prob) * 100:.0f}%"
-    home_class = "side-over" if home_favored else ""
-    away_class = "side-under" if not home_favored else ""
-    home_conf = f'<span class="side-conf">{pct} &middot; {conf}</span>' if home_favored else ""
-    away_conf = f'<span class="side-conf">{pct} &middot; {conf}</span>' if not home_favored else ""
+    tier, conf = confidence_tier(home_prob if home_favored else 1 - home_prob)
+    home_class = "side-toss-up" if tier == "toss-up" else ("side-over" if home_favored else "")
+    away_class = "side-toss-up" if tier == "toss-up" else ("side-under" if not home_favored else "")
+    home_conf = f'<span class="side-conf">{conf}</span>' if home_favored else ""
+    away_conf = f'<span class="side-conf">{conf}</span>' if not home_favored else ""
 
     home_ml, away_ml = _fmt_ml(game.get("home_moneyline")), _fmt_ml(game.get("away_moneyline"))
     edge = game.get("edge")

@@ -18,22 +18,30 @@ SECTION_TEMPLATE = """<details class="card-section">
 
 
 def props_section_html(game_props: pd.DataFrame, home_full: str, away_full: str, kickoff: str,
-                        full_name_fn, headshot_url_fn=None) -> str:
+                        full_name_fn, headshot_url_fn=None, logo_url_fn=None) -> str:
     """game_props: rows from model/player_stats.py's score_props(), already
     filtered to one specific game. Renders "no props posted yet" rather
     than an empty grid when the book hasn't opened player markets for this
-    game -- normal for anything more than a few days out. `headshot_url_fn`
-    is passed straight through to report/cards.py's prop_card_html (None
-    in the Artifact build, since external images can't load there)."""
+    game -- normal for anything more than a few days out. `headshot_url_fn`/
+    `logo_url_fn` are passed straight through to report/cards.py's
+    prop_card_html for its headshot-then-logo-then-initials fallback chain."""
     if game_props is None or game_props.empty:
-        body = '<div class="empty">No player props posted yet for this game.</div>'
+        body = '<div class="empty">No player data available for this game.</div>'
         return SECTION_TEMPLATE.format(body=body)
 
     rows = game_props.to_dict("records")
+    # Market-backed cards (with a real edge to sort by) lead; "no line
+    # available" fallback cards -- QA spec Section 2's coverage
+    # guarantee -- sort after them, grouped by position for readability.
+    def _sort_key(r):
+        if r.get("has_line", True) and r.get("edge") is not None:
+            return (0, -abs(r["edge"]))
+        return (1, r.get("position") or "", r["player"])
+
     cards = []
-    for row in sorted(rows, key=lambda r: -abs(r["edge"])):
+    for row in sorted(rows, key=_sort_key):
         opponent_full = full_name_fn(row["opponent"])
-        cards.append(prop_card_html(row, home_full, away_full, kickoff, opponent_full, headshot_url_fn))
+        cards.append(prop_card_html(row, home_full, away_full, kickoff, opponent_full, headshot_url_fn, logo_url_fn))
 
     body = prop_filter_bar_html(rows) + f'<div class="card-grid">{"".join(cards)}</div>'
     return SECTION_TEMPLATE.format(body=body)

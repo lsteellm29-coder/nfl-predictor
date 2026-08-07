@@ -426,7 +426,8 @@ def _game_props(props: pd.DataFrame | None, game: pd.Series) -> pd.DataFrame | N
     return props[(props["team"] == game["home_team"]) | (props["team"] == game["away_team"])]
 
 
-def _row_data(game: pd.Series, props: pd.DataFrame | None = None, headshot_url_fn=espn_headshot_url) -> dict:
+def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
+              headshot_url_fn=espn_headshot_url, logo_url_fn=get_logo_url) -> dict:
     has_pred = pd.notna(game.get("home_win_prob"))
 
     if has_pred:
@@ -476,7 +477,7 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None, headshot_url_f
         "why": why,
         "game_pick_card": game_pick_card,
         "props_section": props_section_html(
-            _game_props(props, game), home_full, away_full, kickoff, _full_name, headshot_url_fn),
+            _game_props(props, game), home_full, away_full, kickoff, _full_name, headshot_url_fn, logo_url_fn),
     }
 
 

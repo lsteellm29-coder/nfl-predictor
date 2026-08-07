@@ -48,7 +48,8 @@ def qb_passing_game_log(pbp: pd.DataFrame) -> pd.DataFrame:
     dropbacks = pbp[(pbp["qb_dropback"] == 1) & pbp["passer_player_id"].notna()]
     return dropbacks.groupby(
         ["season", "week", "posteam", "passer_player_id", "passer_player_name"]
-    ).agg(pass_yards=("passing_yards", "sum"), pass_tds=("pass_touchdown", "sum")).reset_index()
+    ).agg(pass_yards=("passing_yards", "sum"), pass_tds=("pass_touchdown", "sum"),
+          attempts=("passing_yards", "size")).reset_index()
 
 
 def rb_rushing_game_log(pbp: pd.DataFrame, pos_map: dict) -> pd.DataFrame:
@@ -57,7 +58,8 @@ def rb_rushing_game_log(pbp: pd.DataFrame, pos_map: dict) -> pd.DataFrame:
     rushes = rushes[rushes["rusher_pos"] == "RB"]
     return rushes.groupby(
         ["season", "week", "posteam", "rusher_player_id", "rusher_player_name"]
-    ).agg(rush_yards=("rushing_yards", "sum"), rush_tds=("rush_touchdown", "sum")).reset_index()
+    ).agg(rush_yards=("rushing_yards", "sum"), rush_tds=("rush_touchdown", "sum"),
+          attempts=("rushing_yards", "size")).reset_index()
 
 
 def receiving_game_log(pbp: pd.DataFrame, pos_map: dict) -> pd.DataFrame:
@@ -68,7 +70,7 @@ def receiving_game_log(pbp: pd.DataFrame, pos_map: dict) -> pd.DataFrame:
         ["season", "week", "posteam", "receiver_player_id", "receiver_player_name", "receiver_pos"]
     ).agg(
         receptions=("complete_pass", "sum"), rec_yards=("receiving_yards", "sum"),
-        rec_tds=("pass_touchdown", "sum"),
+        rec_tds=("pass_touchdown", "sum"), targets=("receiving_yards", "size"),
     ).reset_index()
 
 
@@ -196,21 +198,114 @@ def _pivot_market_props(props: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([two_sided, yes], ignore_index=True)
 
 
+# QA spec Section 2: minimum lineup coverage per team per game, and which
+# stat each position's "no line available" fallback card projects.
+COVERAGE_MINIMUMS = {"QB": 1, "RB": 2, "WR": 5, "TE": 2}
+PRIMARY_STAT = {"QB": "pass_yards", "RB": "rush_yards", "WR": "rec_yards", "TE": "rec_yards"}
+_VOLUME_KEY = {"QB": "attempts_avg", "RB": "attempts_avg", "WR": "targets_avg", "TE": "targets_avg"}
+
+
+def required_lineup(team: str, rosters: pd.DataFrame,
+                     qb_avgs: tuple, rb_avgs: tuple, rec_avgs: tuple) -> dict:
+    """Depth-chart-ranked player ids per position for `team`, sized to
+    COVERAGE_MINIMUMS -- ranked by each player's own season-to-date (or
+    fallback) usage volume, among players *currently on this team's
+    roster* (not just whoever touched the ball for this team in old
+    game-log data, which could include someone since traded away).
+    Players with no recorded games in either window (e.g. a true rookie
+    who hasn't played) can't be ranked and are left out -- a real
+    limitation of leaning on prior performance data, not a bug.
+
+    Known gap: this trusts nfl_data_py's own current-season team
+    assignment at face value, and that source has been observed showing
+    an incorrect team for at least one active player during the
+    preseason (before the season's own games start correcting it) --
+    unlike the market-prop path, there's no independent second source to
+    cross-check a fallback-only player against, so a bad upstream team
+    assignment here won't get caught the way a stale market attribution
+    does. qa/validate_rosters.py's week-over-week diff is the best
+    available defense -- a sudden, implausible team change shows up
+    there for manual review, even though it can't be auto-corrected."""
+    avgs_by_pos = {"QB": qb_avgs, "RB": rb_avgs, "WR": rec_avgs, "TE": rec_avgs}
+    out = {}
+    for position, n in COVERAGE_MINIMUMS.items():
+        current_avg, fallback_avg = avgs_by_pos[position]
+        candidates = rosters[(rosters["team"] == team) & (rosters["position"] == position)]["player_id"].unique()
+        scored = []
+        for pid in candidates:
+            rec = _lookup_player_avg(current_avg, fallback_avg, pid, min_games=1)
+            if rec:
+                scored.append((pid, rec.get(_VOLUME_KEY[position], 0) or 0))
+        scored.sort(key=lambda x: -x[1])
+        out[position] = [pid for pid, _ in scored[:n]]
+    return out
+
+
+def _project_mean(stat: str, player_id: str, opponent: str, position: str | None,
+                   qb_avgs: tuple, rb_avgs: tuple, rec_avgs: tuple,
+                   pos_tables_current: dict, pos_tables_fallback: dict,
+                   pass_def: tuple, league_pass_def_fallback: float,
+                   injury_status: dict) -> tuple[float, dict | None] | None:
+    """The same projection math score_props()'s market loop uses, factored
+    out for the no-line fallback path below -- one shared source of truth
+    for "what does the model actually think this player does," whether or
+    not a sportsbook has priced it."""
+    if stat == "pass_yards":
+        rec = _lookup_player_avg(*qb_avgs, player_id)
+        if rec is None:
+            return None
+        pass_def_current, pass_def_fallback = pass_def
+        def_val = pass_def_current.get(opponent, pass_def_fallback.get(opponent))
+        factor = _matchup_factor(None, def_val, league_pass_def_fallback)
+        mean = apply_injury_usage(rec["pass_yards_avg"] * factor, player_id, injury_status)
+        rank = _rank_series(pass_def_current, pass_def_fallback, opponent)
+        return mean, ({"kind": "yards", "group": None, "rank": rank} if rank else None)
+
+    if stat == "rush_yards":
+        rec = _lookup_player_avg(*rb_avgs, player_id)
+        if rec is None:
+            return None
+        def_val = pos_tables_current["rush_def_ypc"].get(opponent, pos_tables_fallback["rush_def_ypc"].get(opponent))
+        league_avg = pos_tables_fallback["rush_def_ypc"].mean()
+        factor = _matchup_factor(None, def_val, league_avg)
+        mean = apply_injury_usage(rec["rush_yards_avg"] * factor, player_id, injury_status)
+        rank = defense_rank(pos_tables_current, pos_tables_fallback, opponent, "RUSH", "yards")
+        return mean, ({"kind": "yards", "group": "RUSH", "rank": rank} if rank else None)
+
+    if stat == "rec_yards":
+        if position not in POSITION_GROUPS:
+            return None
+        rec = _lookup_player_avg(*rec_avgs, player_id)
+        if rec is None:
+            return None
+        def_val, league_avg = None, None
+        if position in pos_tables_fallback["defense_ypt"].columns:
+            fb = pos_tables_fallback["defense_ypt"][position]
+            cur = pos_tables_current["defense_ypt"][position] if position in pos_tables_current["defense_ypt"].columns else pd.Series(dtype=float)
+            def_val, league_avg = cur.get(opponent, fb.get(opponent)), fb.mean()
+        factor = _matchup_factor(None, def_val, league_avg)
+        mean = apply_injury_usage(rec["rec_yards_avg"] * factor, player_id, injury_status)
+        rank = defense_rank(pos_tables_current, pos_tables_fallback, opponent, position, "yards")
+        return mean, ({"kind": "yards", "group": position, "rank": rank} if rank else None)
+
+    return None
+
+
 def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     """Every player prop posted for this week, with the model's own
     projection, over-probability, and edge vs. the market's de-vigged
-    probability. Returns an empty frame (not an error) if no book has
-    posted props yet -- player markets typically don't open until close
-    to game day, so this can legitimately be empty for a week that's
-    still weeks out."""
+    probability -- plus, per QA spec Section 2, a "no line available"
+    model-only card for any required starter (COVERAGE_MINIMUMS) the
+    sportsbook hasn't priced, so lineup completeness never depends
+    entirely on which players a book happened to post lines for. This
+    runs the full computation even when zero market props exist yet
+    (common weeks out from kickoff) -- previously that case short-circuited
+    to an empty frame, which is exactly the "games missing props entirely"
+    problem this section exists to fix."""
     games = fetch_week(week, season)
     props = fetch_props_for_week(games)
-    if props.empty:
-        return pd.DataFrame(columns=[
-            "player", "stat", "team", "opponent", "line", "market_price", "market_over_prob",
-            "projection", "model_over_prob", "edge",
-        ])
-    market = _pivot_market_props(props)
+    market = _pivot_market_props(props) if not props.empty else pd.DataFrame(
+        columns=["player", "stat", "line", "market_price", "market_over_prob", "home_team", "away_team"])
 
     rosters = nfl.import_seasonal_rosters([season, season - 1])
     rosters = rosters[rosters["player_id"] != ""]
@@ -227,14 +322,14 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     rec_current, rec_fallback = (
         receiving_game_log(current_pbp, pos_map), receiving_game_log(fallback_pbp, pos_map))
 
-    qb_avg_current = _player_season_avg(qb_current, "passer_player_id", "passer_player_name", ["pass_yards", "pass_tds"])
-    qb_avg_fallback = _player_season_avg(qb_fallback, "passer_player_id", "passer_player_name", ["pass_yards", "pass_tds"])
-    rb_avg_current = _player_season_avg(rb_current, "rusher_player_id", "rusher_player_name", ["rush_yards", "rush_tds"])
-    rb_avg_fallback = _player_season_avg(rb_fallback, "rusher_player_id", "rusher_player_name", ["rush_yards", "rush_tds"])
+    qb_avg_current = _player_season_avg(qb_current, "passer_player_id", "passer_player_name", ["pass_yards", "pass_tds", "attempts"])
+    qb_avg_fallback = _player_season_avg(qb_fallback, "passer_player_id", "passer_player_name", ["pass_yards", "pass_tds", "attempts"])
+    rb_avg_current = _player_season_avg(rb_current, "rusher_player_id", "rusher_player_name", ["rush_yards", "rush_tds", "attempts"])
+    rb_avg_fallback = _player_season_avg(rb_fallback, "rusher_player_id", "rusher_player_name", ["rush_yards", "rush_tds", "attempts"])
     rec_avg_current = _player_season_avg(
-        rec_current, "receiver_player_id", "receiver_player_name", ["receptions", "rec_yards", "rec_tds"])
+        rec_current, "receiver_player_id", "receiver_player_name", ["receptions", "rec_yards", "rec_tds", "targets"])
     rec_avg_fallback = _player_season_avg(
-        rec_fallback, "receiver_player_id", "receiver_player_name", ["receptions", "rec_yards", "rec_tds"])
+        rec_fallback, "receiver_player_id", "receiver_player_name", ["receptions", "rec_yards", "rec_tds", "targets"])
 
     pos_tables_current = build_position_tables(current_pbp, pos_map)
     pos_tables_fallback = build_position_tables(fallback_pbp, pos_map)
@@ -248,10 +343,21 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         injury_status = {}
 
     rows = []
+    dropped_stale = []
+    covered = set()  # (team, player_id) already represented by a market prop
     for _, m in market.iterrows():
         player_id = name_to_id.get(m["player"])
         team = name_to_team.get(m["player"])
         if player_id is None or team is None:
+            continue
+        # QA spec Section 1: a market prop's player is only trustworthy if
+        # their *current* roster team is actually one of the two teams in
+        # this game -- a mismatch means the roster moved them (trade,
+        # release, practice-squad churn) since the book last updated its
+        # own attribution, and building a card off that would show a
+        # player under the wrong team/opponent.
+        if team not in (m["home_team"], m["away_team"]):
+            dropped_stale.append(f"{m['player']} (prop listed for {m['home_team']}/{m['away_team']}, roster has them at {team})")
             continue
         opponent = m["away_team"] if team == m["home_team"] else m["home_team"]
 
@@ -330,6 +436,7 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
 
         injury = injury_status.get(player_id)
         espn_id = name_to_espn_id.get(m["player"])
+        covered.add((team, player_id))
         rows.append({
             "player": m["player"], "stat": m["stat"], "team": team, "opponent": opponent,
             "position": position, "espn_id": espn_id, "line": m["line"], "market_price": m["market_price"],
@@ -338,6 +445,53 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             "edge": proj["over_prob"] - m["market_over_prob"],
             "reasoning": reasoning,
             "injury_status": injury["status"] if injury else None,
+            "has_line": True,
         })
+
+    if dropped_stale:
+        print(f"score_props: dropped {len(dropped_stale)} prop(s) with a stale team attribution:")
+        for entry in dropped_stale:
+            print(f"  - {entry}")
+
+    # QA spec Section 2: fill in required-lineup gaps the market didn't
+    # cover with a model-only projection (no Vegas line, no P(over) --
+    # there's nothing to be over/under without a line).
+    id_to_name = dict(zip(rosters["player_id"], rosters["player_name"]))
+    id_to_espn_id = dict(zip(rosters["player_id"], rosters["espn_id"]))
+    qb_avgs, rb_avgs, rec_avgs = (qb_avg_current, qb_avg_fallback), (rb_avg_current, rb_avg_fallback), (rec_avg_current, rec_avg_fallback)
+    pass_def = (pass_def_current, pass_def_fallback)
+    coverage_gaps = []
+
+    for _, game in games.iterrows():
+        for team, opponent in ((game["home_team"], game["away_team"]), (game["away_team"], game["home_team"])):
+            lineup = required_lineup(team, rosters, qb_avgs, rb_avgs, rec_avgs)
+            for position, player_ids in lineup.items():
+                for player_id in player_ids:
+                    if (team, player_id) in covered:
+                        continue
+                    covered.add((team, player_id))
+                    stat = PRIMARY_STAT[position]
+                    result = _project_mean(
+                        stat, player_id, opponent, position, qb_avgs, rb_avgs, rec_avgs,
+                        pos_tables_current, pos_tables_fallback, pass_def, league_pass_def_fallback, injury_status)
+                    if result is None:
+                        coverage_gaps.append(f"{id_to_name.get(player_id, player_id)} ({team}, {position}): "
+                                              f"no usable season data to project a fallback card")
+                        continue
+                    mean, reasoning = result
+                    injury = injury_status.get(player_id)
+                    rows.append({
+                        "player": id_to_name.get(player_id, player_id), "stat": stat, "team": team,
+                        "opponent": opponent, "position": position, "espn_id": id_to_espn_id.get(player_id),
+                        "line": None, "market_price": None, "market_over_prob": None,
+                        "projection": mean, "model_over_prob": None, "edge": None,
+                        "reasoning": reasoning, "injury_status": injury["status"] if injury else None,
+                        "has_line": False,
+                    })
+
+    if coverage_gaps:
+        print(f"score_props: {len(coverage_gaps)} required-lineup slot(s) couldn't be filled even with a fallback:")
+        for entry in coverage_gaps:
+            print(f"  - {entry}")
 
     return pd.DataFrame(rows)

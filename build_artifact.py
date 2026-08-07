@@ -83,6 +83,8 @@ PAGE = """<!DOCTYPE html>
   --positive-soft: #E7F5EC;
   --negative: #B23A3A;
   --negative-soft: #FBEAEA;
+  --warning: #8A6D00;
+  --warning-soft: #FFF6D9;
   --edge-glow: transparent;
 }}
 @media (prefers-color-scheme: dark) {{
@@ -98,6 +100,8 @@ PAGE = """<!DOCTYPE html>
     --positive-soft: #12261B;
     --negative: #E0716D;
     --negative-soft: #2A1414;
+    --warning: #E8C547;
+    --warning-soft: #2E2810;
   }}
 }}
 :root[data-theme="dark"] {{
@@ -112,6 +116,8 @@ PAGE = """<!DOCTYPE html>
   --positive-soft: #12261B;
   --negative: #E0716D;
   --negative-soft: #2A1414;
+  --warning: #E8C547;
+  --warning-soft: #2E2810;
 }}
 :root[data-theme="light"] {{
   --paper: #F4F5F8;
@@ -125,6 +131,8 @@ PAGE = """<!DOCTYPE html>
   --positive-soft: #E7F5EC;
   --negative: #B23A3A;
   --negative-soft: #FBEAEA;
+  --warning: #8A6D00;
+  --warning-soft: #FFF6D9;
 }}
 
 * {{ box-sizing: border-box; }}
@@ -412,9 +420,11 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         game_htmls = []
         for _, game in day_games.iterrows():
             # headshot_url_fn=None: external images can't load in a
-            # self-contained Artifact, so prop cards fall back to an
-            # initials avatar instead of the live ESPN CDN URL.
-            d = _row_data(game, props, headshot_url_fn=None)
+            # self-contained Artifact. logo_url_fn=embed: the team-logo
+            # fallback (QA spec Section 3) uses the same base64-embedded
+            # logos already loaded for the game header, so it stays fully
+            # self-contained too.
+            d = _row_data(game, props, headshot_url_fn=None, logo_url_fn=embed)
             d["away_logo"] = embed(game["away_team"])
             d["home_logo"] = embed(game["home_team"])
             away_td_pct, away_td_name = td_chip_parts(game.get("away_td_scorer"))
