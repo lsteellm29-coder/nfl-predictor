@@ -31,10 +31,14 @@ CONFIDENCE_THRESHOLD = 0.60
 def confidence_tier(prob: float) -> tuple[str, str]:
     """prob: the model's probability for whichever side is being colored
     (always >=0.5 by construction -- confidence is only ever shown on the
-    side the model actually favors). Returns (css class suffix, label)."""
+    side the model actually favors). Returns (css class suffix, label).
+    The label always carries the real percentage, toss-up included --
+    only the color (via the css class) signals the tier; the number
+    itself shouldn't disappear just because it's a weak lean."""
+    label = f"Model favors {prob * 100:.0f}%"
     if prob >= CONFIDENCE_THRESHOLD:
-        return "strong", f"Model favors {prob * 100:.0f}%"
-    return "toss-up", "Toss-up"
+        return "strong", label
+    return "toss-up", label
 
 
 # Real definitions, not simplified ones -- matches how each term is

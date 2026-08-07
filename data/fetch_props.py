@@ -13,14 +13,28 @@ import requests
 from config import ODDS_API_KEY
 
 EVENT_ODDS_URL = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event_id}/odds"
-PREFERRED_BOOK = "draftkings"
 
-# Odds API market key -> our internal stat name.
+# Real sportsbooks (DraftKings, William Hill) mostly only post
+# anytime-TD odds this far before kickoff -- yardage/reception lines
+# don't show up there yet, but they're already live at DFS-style books
+# (PrizePicks, Underdog, betr), which is why fetch_event_props queries
+# the us_dfs region too. When more than one book has the same
+# (player, stat) priced, this order decides which price wins, so the
+# choice stays consistent week to week instead of picking arbitrarily.
+PREFERRED_BOOK_ORDER = ["draftkings", "fanduel", "williamhill_us", "prizepicks", "underdog", "betr_us_dfs"]
+
+# Odds API market key -> our internal stat name. Must match the stat
+# names model/player_stats.py's score_props() and report/cards.py's
+# STAT_LABEL actually check for ("pass_yards"/"rush_yards"/"rec_yards",
+# not the Odds API's own abbreviated "_yds" market-key suffix) -- a
+# mismatch here means score_props() silently falls through to its
+# `else: continue` for every yardage prop, dropping them all regardless
+# of whether real market data came back.
 PROP_MARKETS = {
-    "player_pass_yds": "pass_yds",
-    "player_rush_yds": "rush_yds",
+    "player_pass_yds": "pass_yards",
+    "player_rush_yds": "rush_yards",
     "player_receptions": "receptions",
-    "player_reception_yds": "rec_yds",
+    "player_reception_yds": "rec_yards",
     "player_anytime_td": "anytime_td",
 }
 
@@ -32,7 +46,14 @@ def fetch_event_props(event_id: str) -> dict:
         EVENT_ODDS_URL.format(event_id=event_id),
         params={
             "apiKey": ODDS_API_KEY,
-            "regions": "us",
+            # us_dfs (PrizePicks/Underdog/betr) is where yardage and
+            # reception props actually get posted this far out -- us/us2
+            # sportsbooks mostly only have anytime-TD priced yet.
+            # Fetching all three and merging in parse_event_props gets
+            # every real line that's live anywhere, instead of the
+            # single-region call silently missing markets that exist,
+            # just not at a traditional sportsbook.
+            "regions": "us,us2,us_dfs",
             "markets": ",".join(PROP_MARKETS),
             "oddsFormat": "american",
         },
@@ -42,13 +63,13 @@ def fetch_event_props(event_id: str) -> dict:
     return resp.json()
 
 
-def _pick_bookmaker(bookmakers: list[dict]) -> dict | None:
-    if not bookmakers:
-        return None
-    for book in bookmakers:
-        if book["key"] == PREFERRED_BOOK:
-            return book
-    return bookmakers[0]
+def _ordered_bookmakers(bookmakers: list[dict]) -> list[dict]:
+    def rank(book: dict) -> int:
+        try:
+            return PREFERRED_BOOK_ORDER.index(book["key"])
+        except ValueError:
+            return len(PREFERRED_BOOK_ORDER)
+    return sorted(bookmakers, key=rank)
 
 
 def american_to_prob(price: float) -> float:
@@ -67,39 +88,55 @@ def _devig_pair(over_price: float, under_price: float) -> tuple[float, float]:
 
 def parse_event_props(raw: dict) -> pd.DataFrame:
     """One row per (player, stat, side) -- side is "over"/"under" for
-    yardage/reception markets, "yes" for anytime_td (usually one-sided)."""
-    book = _pick_bookmaker(raw.get("bookmakers", []))
-    if not book:
+    yardage/reception markets, "yes" for anytime_td (usually one-sided).
+    Merges across every bookmaker in the response rather than picking a
+    single one: real sportsbooks and DFS-style books post different
+    markets this far before kickoff (see fetch_event_props), so limiting
+    to one book meant real, currently-live lines at a different book
+    read as "not posted" when they actually were. Each (player, stat) is
+    only taken once, from the highest-priority book that has it
+    (PREFERRED_BOOK_ORDER), so the source is still consistent from week
+    to week rather than arbitrary."""
+    books = _ordered_bookmakers(raw.get("bookmakers", []))
+    if not books:
         return pd.DataFrame(columns=["player", "stat", "side", "line", "price", "prob"])
 
     rows = []
-    for market in book.get("markets", []):
-        stat = PROP_MARKETS.get(market["key"])
-        if stat is None:
-            continue
-        outcomes = market["outcomes"]
-        if stat == "anytime_td":
-            for o in outcomes:
-                if o["name"] != "Yes":
-                    continue
-                rows.append({
-                    "player": o["description"], "stat": stat, "side": "yes",
-                    "line": None, "price": o["price"], "prob": american_to_prob(o["price"]),
-                })
-            continue
-
-        by_player: dict[str, dict] = {}
-        for o in outcomes:
-            by_player.setdefault(o["description"], {})[o["name"]] = o
-        for player, sides in by_player.items():
-            over, under = sides.get("Over"), sides.get("Under")
-            if not over or not under:
+    seen_td = set()
+    seen_ou = set()
+    for book in books:
+        for market in book.get("markets", []):
+            stat = PROP_MARKETS.get(market["key"])
+            if stat is None:
                 continue
-            over_prob, under_prob = _devig_pair(over["price"], under["price"])
-            rows.append({"player": player, "stat": stat, "side": "over",
-                         "line": over["point"], "price": over["price"], "prob": over_prob})
-            rows.append({"player": player, "stat": stat, "side": "under",
-                         "line": under["point"], "price": under["price"], "prob": under_prob})
+            outcomes = market["outcomes"]
+            if stat == "anytime_td":
+                for o in outcomes:
+                    if o["name"] != "Yes" or o["description"] in seen_td:
+                        continue
+                    seen_td.add(o["description"])
+                    rows.append({
+                        "player": o["description"], "stat": stat, "side": "yes",
+                        "line": None, "price": o["price"], "prob": american_to_prob(o["price"]),
+                    })
+                continue
+
+            by_player: dict[str, dict] = {}
+            for o in outcomes:
+                by_player.setdefault(o["description"], {})[o["name"]] = o
+            for player, sides in by_player.items():
+                key = (player, stat)
+                if key in seen_ou:
+                    continue
+                over, under = sides.get("Over"), sides.get("Under")
+                if not over or not under:
+                    continue
+                seen_ou.add(key)
+                over_prob, under_prob = _devig_pair(over["price"], under["price"])
+                rows.append({"player": player, "stat": stat, "side": "over",
+                             "line": over["point"], "price": over["price"], "prob": over_prob})
+                rows.append({"player": player, "stat": stat, "side": "under",
+                             "line": under["point"], "price": under["price"], "prob": under_prob})
 
     return pd.DataFrame(rows)
 
