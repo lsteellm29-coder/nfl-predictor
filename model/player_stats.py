@@ -10,6 +10,7 @@ rolling stats are.
 """
 
 import os
+import re
 
 import nfl_data_py as nfl
 import numpy as np
@@ -53,9 +54,18 @@ def qb_passing_game_log(pbp: pd.DataFrame) -> pd.DataFrame:
 
 
 def rb_rushing_game_log(pbp: pd.DataFrame, pos_map: dict) -> pd.DataFrame:
+    """Despite the name, this covers every real rusher, not just RBs --
+    mobile QBs (scrambles, sneaks, designed runs) and WRs (jet sweeps,
+    end-arounds) both show up in real anytime-TD and rushing-yards
+    markets, and this table used to be filtered to RB only. That meant
+    score_props() had no season data to project against for any of
+    them, silently dropping real, currently-live market props even
+    though both the market and this codebase's own play-by-play data
+    had everything needed. required_lineup()'s RB slot is unaffected --
+    it filters candidates by roster position before ever looking a
+    player up in this table, so a QB or WR still can't fill an RB
+    coverage slot just because they show up here."""
     rushes = pbp[(pbp["play_type"] == "run") & pbp["rusher_player_id"].notna()].copy()
-    rushes["rusher_pos"] = rushes["rusher_player_id"].map(pos_map)
-    rushes = rushes[rushes["rusher_pos"] == "RB"]
     return rushes.groupby(
         ["season", "week", "posteam", "rusher_player_id", "rusher_player_name"]
     ).agg(rush_yards=("rushing_yards", "sum"), rush_tds=("rush_touchdown", "sum"),
@@ -113,6 +123,32 @@ def _player_season_avg(game_log: pd.DataFrame, id_col: str, name_col: str, stat_
             row[f"{col}_avg"] = totals.loc[pid, col] / games[pid]
         out[pid] = row
     return out
+
+
+def _normalize_name(name: str) -> str:
+    """Strips cosmetic differences between how a market source spells a
+    player's name and how nfl_data_py's roster spells the same real
+    person -- periods in initials ("KC Concepcion" vs "K.C. Concepcion"),
+    a missing/extra suffix (nfl_data_py itself is inconsistent here:
+    "Brian Thomas Jr." keeps the suffix, "Michael Pittman Jr." becomes
+    plain "Michael Pittman"). Only ever used to bridge an exact-match
+    miss, never in place of an exact match."""
+    name = name.replace(".", "")
+    name = re.sub(r"\s+(jr|sr|ii|iii|iv)$", "", name, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", name).strip().lower()
+
+
+def _build_normalized_name_map(names) -> dict:
+    """normalized name -> canonical roster spelling, for names whose
+    normalized form is unique. A normalized collision (two different
+    real players stripping down to the same string -- e.g. two
+    "Michael Pittman"s) is left out rather than guessed at; an
+    unresolved name falls back to being dropped as unmatched, same as
+    today, not silently mapped to the wrong person."""
+    grouped: dict[str, set] = {}
+    for name in names:
+        grouped.setdefault(_normalize_name(name), set()).add(name)
+    return {norm: next(iter(canon)) for norm, canon in grouped.items() if len(canon) == 1}
 
 
 def _lookup_player_avg(current: dict, fallback: dict, player_id: str, min_games: int = 2) -> dict | None:
@@ -313,6 +349,34 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     name_to_team = dict(zip(rosters["player_name"], rosters["team"]))
     name_to_espn_id = dict(zip(rosters["player_name"], rosters["espn_id"]))
     pos_map = dict(zip(rosters["player_id"], rosters["position"]))
+    # A market source's spelling of a name doesn't always exactly match
+    # nfl_data_py's own -- falls back to a normalized match (see
+    # _normalize_name) only when there's no exact hit, so a real,
+    # currently-live market prop doesn't silently get dropped over
+    # nothing more than a stray period or suffix.
+    normalized_roster_names = _build_normalized_name_map(rosters["player_name"].unique())
+
+    def _resolve_market_name(market_name: str) -> str:
+        if market_name in name_to_id:
+            return market_name
+        normalized_hit = normalized_roster_names.get(_normalize_name(market_name))
+        if normalized_hit:
+            return normalized_hit
+        # Last resort: a source with the two words swapped (seen in the
+        # wild as e.g. "James Jordan" for roster's "Jordan James") --
+        # only for a plain two-word name, and only accepted if the
+        # swapped form itself resolves unambiguously, so this can't
+        # match two unrelated real people who happen to share a
+        # first/last name pair in reverse.
+        parts = market_name.split()
+        if len(parts) == 2:
+            swapped = f"{parts[1]} {parts[0]}"
+            if swapped in name_to_id:
+                return swapped
+            swapped_hit = normalized_roster_names.get(_normalize_name(swapped))
+            if swapped_hit:
+                return swapped_hit
+        return market_name
 
     fallback_pbp = _fallback_season_pbp(season)
     current_pbp = _current_season_pbp(season, week, fallback_pbp)
@@ -346,8 +410,9 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     dropped_stale = []
     covered = set()  # (team, player_id) already represented by a market prop
     for _, m in market.iterrows():
-        player_id = name_to_id.get(m["player"])
-        team = name_to_team.get(m["player"])
+        canonical_name = _resolve_market_name(m["player"])
+        player_id = name_to_id.get(canonical_name)
+        team = name_to_team.get(canonical_name)
         if player_id is None or team is None:
             continue
         # QA spec Section 1: a market prop's player is only trustworthy if
@@ -435,7 +500,7 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             continue
 
         injury = injury_status.get(player_id)
-        espn_id = name_to_espn_id.get(m["player"])
+        espn_id = name_to_espn_id.get(canonical_name)
         covered.add((team, player_id))
         rows.append({
             "player": m["player"], "stat": m["stat"], "team": team, "opponent": opponent,
