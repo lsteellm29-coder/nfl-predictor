@@ -420,7 +420,7 @@ def _fmt_td_scorer(pred: dict | None) -> str:
     else:
         adj_note = ""
     return (f"{pred['player']} -- {pred['prob'] * 100:.0f}% anytime-TD estimate{adj_note} "
-            f"({pred['td_count']} TDs in {pred['games']} games, {pred['source']})")
+            f"({pred['player_share'] * 100:.0f}% of the team's red-zone touches, {pred['games']} games)")
 
 
 def _game_props(props: pd.DataFrame | None, game: pd.Series) -> pd.DataFrame | None:

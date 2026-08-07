@@ -31,6 +31,10 @@ from data.team_history import coach_h2h, team_last_n_meetings
 from data.team_stats import build_rolling_team_stats, build_team_game_stats
 from model.calibration import apply_calibrator
 from model.elo import compute_elo_ratings
+from model.td_model import (
+    player_red_zone_touches, positional_baseline_conversion, project_td_probability_live,
+    recency_weighted_touch_share, season_to_date, team_red_zone_defense, team_red_zone_touches_per_game,
+)
 from model.train import FEATURE_COLS, STAT_COLS, predict_proba
 from report.narrative import select_lead_narrative
 
@@ -181,38 +185,6 @@ def _build_features(
     return feat
 
 
-def _offensive_tds(pbp: pd.DataFrame) -> pd.DataFrame:
-    """Rush + receiving TD plays -- the standard "anytime TD scorer"
-    definition. Excludes return TDs (special teams/defense, not an
-    offensive skill-position score)."""
-    return pbp[
-        (pbp["touchdown"] == 1)
-        & ((pbp["pass_touchdown"] == 1) | (pbp["rush_touchdown"] == 1))
-    ]
-
-
-def _player_td_counts(pbp: pd.DataFrame) -> pd.DataFrame:
-    """Rush + receiving TDs per (team, player)."""
-    tds = _offensive_tds(pbp)
-    tds = tds[tds["td_player_name"].notna()]
-    return (
-        tds.groupby(["posteam", "td_player_name"])
-        .size()
-        .reset_index(name="td_count")
-    )
-
-
-def _defense_td_rate_allowed(pbp: pd.DataFrame, games_played: dict) -> dict:
-    """Rush + receiving TDs allowed per game, by defense -- how often a
-    team's defense lets *any* offensive player score, independent of who."""
-    tds = _offensive_tds(pbp)
-    allowed = tds.groupby("defteam").size()
-    return {
-        team: allowed.get(team, 0) / games
-        for team, games in games_played.items() if games > 0
-    }
-
-
 def _team_games_played(schedule: pd.DataFrame) -> dict:
     """team -> number of completed REG games in the given schedule slice."""
     reg = schedule[(schedule["game_type"] == "REG") & schedule["home_score"].notna()]
@@ -221,78 +193,104 @@ def _team_games_played(schedule: pd.DataFrame) -> dict:
     return home.add(away, fill_value=0).to_dict()
 
 
-def _current_season_td_data(season: int, week: int):
+def build_td_scorer_inputs(season: int, week: int):
+    """Everything get_td_scorer_prediction needs, built once per
+    score_week() call and reused across every game -- the same
+    red-zone-share model/td_model.py inputs model/player_stats.py's
+    score_props() builds for the props layer, so the game-breakdown
+    "likely TD scorer" callout and the props cards agree with each other
+    instead of running on two different, disagreeing models (this used
+    to be a much cruder "whoever has the most TDs so far this season"
+    count with no real opportunity signal behind it)."""
+    fallback_pbp = pd.read_parquet(PBP_PATH)
+    fallback_pbp = fallback_pbp[fallback_pbp["season"] == season - 1]
+    current_pbp = _current_season_pbp_for_td(season, week, fallback_pbp)
+    pos_map = position_map([season, season - 1])
+
+    touch_log_current = player_red_zone_touches(current_pbp)
+    touch_log_fallback = player_red_zone_touches(fallback_pbp)
+    touch_share = (
+        recency_weighted_touch_share(touch_log_current, week),
+        recency_weighted_touch_share(touch_log_fallback, 30),
+    )
+    team_touches = {
+        **team_red_zone_touches_per_game(touch_log_fallback, 30),
+        **team_red_zone_touches_per_game(touch_log_current, week),
+    }
+    rz_def_current = season_to_date(team_red_zone_defense(current_pbp), ["team"], ["rz_trips_allowed", "rz_tds_allowed"], week)
+    rz_def_fallback = season_to_date(team_red_zone_defense(fallback_pbp), ["team"], ["rz_trips_allowed", "rz_tds_allowed"], 30)
+    team_def = pd.concat([rz_def_fallback[~rz_def_fallback["team"].isin(rz_def_current["team"])], rz_def_current])
+    baseline_rates = {
+        **positional_baseline_conversion(touch_log_fallback, pos_map, 30),
+        **positional_baseline_conversion(touch_log_current, pos_map, week),
+    }
+    league_avg_rz_td_rate = (
+        (team_def["rz_tds_allowed"] / team_def["rz_trips_allowed"]).mean() if not team_def.empty else None)
+
+    # Candidate pool per team: anyone with real red-zone touch history
+    # (current or fallback season) -- simpler than reusing
+    # model/player_stats.py's required_lineup ranking (a display-coverage
+    # concern, not relevant here) and directly matches "who's actually
+    # gotten real scoring chances."
+    rosters = nfl.import_seasonal_rosters([season, season - 1])
+    rosters = rosters[rosters["player_id"] != ""]
+    id_to_name = dict(zip(rosters["player_id"], rosters["player_name"]))
+    candidates_by_team: dict[str, set] = {}
+    for share_table in touch_share:
+        for team, player_id in zip(share_table["team"], share_table["player_id"]):
+            candidates_by_team.setdefault(team, set()).add(player_id)
+
+    return {
+        "touch_share": touch_share, "team_touches": team_touches, "team_def": team_def,
+        "baseline_rates": baseline_rates, "league_avg_rz_td_rate": league_avg_rz_td_rate,
+        "pos_map": pos_map, "id_to_name": id_to_name, "candidates_by_team": candidates_by_team,
+    }
+
+
+def _current_season_pbp_for_td(season: int, week: int, fallback_pbp: pd.DataFrame) -> pd.DataFrame:
     schedule = nfl.import_schedules([season])
-    played = schedule[
-        (schedule["game_type"] == "REG")
-        & schedule["home_score"].notna()
-        & (schedule["week"] < week)
-    ]
+    played = schedule[(schedule["game_type"] == "REG") & schedule["home_score"].notna() & (schedule["week"] < week)]
     if played.empty:
-        return pd.DataFrame(columns=["posteam", "td_player_name", "td_count"]), {}, {}
-
+        return fallback_pbp.iloc[0:0]
     pbp = nfl.import_pbp_data([season], downcast=True)
-    pbp = pbp[pbp["week"] < week]
-    games_played = _team_games_played(played)
-    counts = _player_td_counts(pbp)
-    def_rates = _defense_td_rate_allowed(pbp, games_played)
-    return counts, games_played, def_rates
+    return pbp[pbp["week"] < week]
 
 
-def _fallback_td_data(season: int):
-    """Prior season's full-season TD counts + games played, for teams/players
-    with no current-season data yet. Note: attributes players to whatever
-    team they played for *last* season -- if someone changed teams in the
-    offseason, this won't reflect that until they've scored for their new
-    team."""
-    pbp = pd.read_parquet(PBP_PATH)
-    pbp = pbp[pbp["season"] == season - 1]
-    schedule = pd.read_parquet(SCHEDULES_PATH)
-    games_played = _team_games_played(schedule[schedule["season"] == season - 1])
-    counts = _player_td_counts(pbp)
-    def_rates = _defense_td_rate_allowed(pbp, games_played)
-    return counts, games_played, def_rates
-
-
-def get_td_scorer_prediction(
-    team: str, opponent: str, current, fallback,
-    def_rates: dict, league_avg_def_rate: float,
-    implied_totals: dict, league_avg_implied_total: float,
-) -> dict | None:
-    (current_counts, current_games), (fallback_counts, fallback_games) = current, fallback
-
-    pool, games, source = current_counts[current_counts["posteam"] == team], current_games.get(team, 0), "this season"
-    if pool.empty or pool["td_count"].sum() == 0 or games == 0:
-        pool = fallback_counts[fallback_counts["posteam"] == team]
-        games, source = fallback_games.get(team, 0), "last season"
-    if pool.empty or games == 0:
+def get_td_scorer_prediction(team: str, opponent: str, td_inputs: dict,
+                              implied_totals: dict, league_avg_implied_total: float) -> dict | None:
+    """The team's most likely TD scorer this game -- whoever among real
+    red-zone-touch candidates on `team` has the highest projected
+    probability (model/td_model.py's project_td_probability_live, same
+    engine the props cards use), with one more adjustment the props layer
+    doesn't apply: this game's Vegas-implied team total vs. the week's
+    average (a shootout raises everyone's odds; a low-scoring line lowers
+    them), capped 0.6x-1.6x same as the rest of this codebase's small-
+    sample matchup factors."""
+    candidates = td_inputs["candidates_by_team"].get(team, set())
+    best_id, best_result = None, None
+    for player_id in candidates:
+        position = td_inputs["pos_map"].get(player_id)
+        result = project_td_probability_live(
+            team, opponent, player_id, position, td_inputs["touch_share"], td_inputs["team_touches"],
+            td_inputs["team_def"], td_inputs["baseline_rates"], td_inputs["league_avg_rz_td_rate"])
+        if result is None:
+            continue
+        if best_result is None or result["expected_tds"] > best_result["expected_tds"]:
+            best_id, best_result = player_id, result
+    if best_result is None:
         return None
-
-    top = pool.sort_values("td_count", ascending=False).iloc[0]
-    td_count = int(top["td_count"])
-    base_rate = td_count / games
-
-    # Two matchup adjustments to the player's own scoring rate, each capped
-    # at 0.6x-1.6x so a small sample (e.g. 2 games of defensive data) can't
-    # swing the estimate wildly:
-    #  - opposing defense: how many TDs it allows per game vs. league average
-    #  - game environment: this game's Vegas-implied team total vs. the
-    #    average implied total across this week's games (a shootout raises
-    #    everyone's odds; a low-scoring line lowers them)
-    def_factor = 1.0
-    if league_avg_def_rate and opponent in def_rates:
-        def_factor = _clip(def_rates[opponent] / league_avg_def_rate, 0.6, 1.6)
 
     total_factor = 1.0
     if league_avg_implied_total and team in implied_totals:
         total_factor = _clip(implied_totals[team] / league_avg_implied_total, 0.6, 1.6)
 
-    adjusted_rate = base_rate * def_factor * total_factor
-    prob = 1 - math.exp(-adjusted_rate)
+    adjusted_expected_tds = best_result["expected_tds"] * total_factor
+    prob = 1 - math.exp(-adjusted_expected_tds) if adjusted_expected_tds > 0 else 0.0
     return {
-        "player": top["td_player_name"], "td_count": td_count, "games": int(games),
-        "source": source, "base_prob": 1 - math.exp(-base_rate),
-        "def_factor": def_factor, "total_factor": total_factor, "prob": prob,
+        "player": td_inputs["id_to_name"].get(best_id, best_id),
+        "prob": prob, "base_prob": best_result["prob"],
+        "def_factor": best_result["def_factor"], "total_factor": total_factor,
+        "player_share": best_result["player_share"], "games": best_result["n_games"],
     }
 
 
@@ -365,7 +363,7 @@ def _fallback_season_pbp(season: int) -> pd.DataFrame:
 def _current_season_pbp(season: int, week: int, fallback_pbp: pd.DataFrame) -> pd.DataFrame:
     """This season's pbp through `week`, or an empty frame shaped like
     `fallback_pbp` if the season hasn't produced any games yet -- same
-    empty-early-season handling as _current_season_td_data."""
+    empty-early-season handling as _current_season_pbp_for_td."""
     schedule = nfl.import_schedules([season])
     played = schedule[
         (schedule["game_type"] == "REG") & schedule["home_score"].notna() & (schedule["week"] < week)
@@ -398,13 +396,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         print(f"Warning: couldn't fetch live injury data ({e}); scoring without it.")
         injury_impact = {}
 
-    current_counts, current_games, current_def_rates = _current_season_td_data(season, week)
-    fallback_counts, fallback_games, fallback_def_rates = _fallback_td_data(season)
-    current_td_data = (current_counts, current_games)
-    fallback_td_data = (fallback_counts, fallback_games)
-
-    def_rates = {**fallback_def_rates, **current_def_rates}
-    league_avg_def_rate = sum(def_rates.values()) / len(def_rates) if def_rates else 0.0
+    td_inputs = build_td_scorer_inputs(season, week)
 
     implied_totals = get_implied_team_totals(games)
     league_avg_implied_total = (
@@ -432,11 +424,9 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         row = game.to_dict()
         row["wind_speed"] = feat["wind_speed"] if feat else get_game_wind_speed(game)
         row["home_td_scorer"] = get_td_scorer_prediction(
-            game["home_team"], game["away_team"], current_td_data, fallback_td_data,
-            def_rates, league_avg_def_rate, implied_totals, league_avg_implied_total)
+            game["home_team"], game["away_team"], td_inputs, implied_totals, league_avg_implied_total)
         row["away_td_scorer"] = get_td_scorer_prediction(
-            game["away_team"], game["home_team"], current_td_data, fallback_td_data,
-            def_rates, league_avg_def_rate, implied_totals, league_avg_implied_total)
+            game["away_team"], game["home_team"], td_inputs, implied_totals, league_avg_implied_total)
         default_elo = {"off": 1500.0, "def": 1500.0}
         if game["home_team"] in stats.index:
             row["home_stats"] = stats.loc[game["home_team"]].to_dict()
