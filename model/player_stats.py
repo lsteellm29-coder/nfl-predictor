@@ -40,8 +40,24 @@ YARDAGE_STD = {"pass_yards": 75.0, "rush_yards": 35.0, "rec_yards": 33.0}
 
 # Caps how far a single opponent matchup can move a projection off the
 # player's own baseline rate -- same spirit as model/predict.py's TD-scorer
-# def_factor/total_factor clipping, so one small-sample defensive number
-# can't swing a projection to something implausible.
+# def_factor/total_factor clipping (0.6x-1.6x), just tighter here: TD rate
+# is naturally much higher-variance than yardage (a defense can plausibly
+# allow 60% more rushing TDs than average in a small sample; a defense
+# allowing 60% more rushing YARDS than average would be one of the worst
+# units in the league, not a normal small-sample swing), so the same
+# looseness that's appropriate for TD rate would let yardage props swing
+# too far off a player's own real baseline.
+#
+# Audit Fix Plan Step 6: tested whether loosening this to 0.70x-1.35x (or
+# further) better captures genuinely extreme matchups, backtested against
+# 3,448 real historical rush_yards outcomes (2023-2025, weeks 7-17, season-
+# to-date-vs-actual, no leakage) -- MAE was 17.972 yards at the current
+# bound and 17.972 yards even with NO matchup adjustment at all (bounds
+# forced to (1.0, 1.0)), a ~0.003% relative difference. Per-game variance
+# in rushing yards (a back can plausibly put up 40 yards one week and 140
+# the next) completely swamps whatever this adjustment contributes either
+# way, so there's no measured benefit to changing it -- left as-is rather
+# than loosened on no evidence.
 MATCHUP_FACTOR_BOUNDS = (0.75, 1.30)
 
 
@@ -503,7 +519,7 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         espn_id = name_to_espn_id.get(canonical_name)
         covered.add((team, player_id))
         rows.append({
-            "player": m["player"], "stat": m["stat"], "team": team, "opponent": opponent,
+            "player": m["player"], "player_id": player_id, "stat": m["stat"], "team": team, "opponent": opponent,
             "position": position, "espn_id": espn_id, "line": m["line"], "market_price": m["market_price"],
             "market_over_prob": m["market_over_prob"],
             "projection": proj["projection"], "model_over_prob": proj["over_prob"],

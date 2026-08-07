@@ -28,6 +28,17 @@ LOG_COLS = [
     "correct", "model_beat_market",
 ]
 
+PROPS_LOG_PATH = os.path.join(os.path.dirname(__file__), "logs", "props_results.csv")
+
+# Only has_line=True props are logged -- a "no line available" fallback
+# card has no market probability to grade against, and no over/under side
+# was ever claimed for it, so there's nothing to score as right or wrong.
+PROPS_LOG_COLS = [
+    "season", "week", "player", "player_id", "team", "opponent", "stat", "line",
+    "market_over_prob", "model_over_prob", "edge",
+    "actual_value", "actual_over", "model_correct", "market_correct", "model_beat_market",
+]
+
 
 def _load_log() -> pd.DataFrame:
     if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 0:
@@ -100,6 +111,122 @@ def log_week(predictions: pd.DataFrame, week: int, season: int) -> pd.DataFrame:
     return log_df
 
 
+def _load_props_log() -> pd.DataFrame:
+    if os.path.exists(PROPS_LOG_PATH) and os.path.getsize(PROPS_LOG_PATH) > 0:
+        return pd.read_csv(PROPS_LOG_PATH)
+    return pd.DataFrame(columns=PROPS_LOG_COLS)
+
+
+def _actual_stat_value(stat: str, player_id, week: int, qb_log: pd.DataFrame,
+                        rb_log: pd.DataFrame, rec_log: pd.DataFrame) -> float | None:
+    """A player's real total for `stat` in a specific already-played week,
+    from the same per-player game-log tables model/player_stats.py builds
+    for projection -- None if the player didn't appear in that week's pbp
+    at all (e.g. inactive/didn't play), which isn't gradeable as a wrong
+    prediction, just not observed."""
+    if stat == "pass_yards":
+        row = qb_log[(qb_log["week"] == week) & (qb_log["passer_player_id"] == player_id)]
+        return float(row["pass_yards"].iloc[0]) if not row.empty else None
+    if stat == "rush_yards":
+        row = rb_log[(rb_log["week"] == week) & (rb_log["rusher_player_id"] == player_id)]
+        return float(row["rush_yards"].iloc[0]) if not row.empty else None
+    if stat == "rec_yards":
+        row = rec_log[(rec_log["week"] == week) & (rec_log["receiver_player_id"] == player_id)]
+        return float(row["rec_yards"].iloc[0]) if not row.empty else None
+    if stat == "receptions":
+        row = rec_log[(rec_log["week"] == week) & (rec_log["receiver_player_id"] == player_id)]
+        return float(row["receptions"].iloc[0]) if not row.empty else None
+    if stat == "anytime_td":
+        # A player can score on the ground or through the air -- both
+        # count toward the same "did they score at all" market, so this
+        # sums whichever rows exist rather than picking one table.
+        rush_row = rb_log[(rb_log["week"] == week) & (rb_log["rusher_player_id"] == player_id)]
+        rec_row = rec_log[(rec_log["week"] == week) & (rec_log["receiver_player_id"] == player_id)]
+        if rush_row.empty and rec_row.empty:
+            return None
+        rush_tds = float(rush_row["rush_tds"].iloc[0]) if not rush_row.empty else 0.0
+        rec_tds = float(rec_row["rec_tds"].iloc[0]) if not rec_row.empty else 0.0
+        return rush_tds + rec_tds
+    return None
+
+
+def _grade_pending_props(log_df: pd.DataFrame) -> pd.DataFrame:
+    """Fills in actual results for logged props whose games have since been
+    played, using the exact same game-log builders model/player_stats.py
+    uses to project them -- so grading is measuring the same real stat the
+    prediction was made against, not an approximation of it."""
+    pending = log_df[log_df["actual_value"].isna()]
+    if pending.empty:
+        return log_df
+
+    from data.positional_matchups import position_map
+    from model.player_stats import qb_passing_game_log, rb_rushing_game_log, receiving_game_log
+
+    for season in sorted(pending["season"].unique()):
+        season = int(season)
+        # nflverse doesn't publish a pbp file for a season until it has at
+        # least one played game -- same check model/predict.py's
+        # _current_season_pbp() already makes before fetching, needed here
+        # too since an all-pending season (nothing played yet) would
+        # otherwise 404 on a file that doesn't exist yet.
+        schedule = nfl.import_schedules([season])
+        if not (schedule["home_score"].notna()).any():
+            continue
+        pbp = nfl.import_pbp_data([season], downcast=True)
+        pos_map = position_map([season])
+        qb_log = qb_passing_game_log(pbp)
+        rb_log = rb_rushing_game_log(pbp, pos_map)
+        rec_log = receiving_game_log(pbp, pos_map)
+        played_weeks = set(pbp["week"].unique())
+
+        season_pending = pending[pending["season"] == season]
+        for idx, row in season_pending.iterrows():
+            week = int(row["week"])
+            if week not in played_weeks:
+                continue  # game hasn't been played yet
+            actual = _actual_stat_value(row["stat"], row["player_id"], week, qb_log, rb_log, rec_log)
+            if actual is None:
+                continue  # player didn't play (inactive/DNP) -- not a gradeable miss
+
+            actual_over = actual > row["line"]
+            model_side_over = row["model_over_prob"] >= 0.5
+            market_side_over = row["market_over_prob"] >= 0.5
+
+            log_df.loc[idx, "actual_value"] = actual
+            log_df.loc[idx, "actual_over"] = actual_over
+            log_df.loc[idx, "model_correct"] = model_side_over == actual_over
+            log_df.loc[idx, "market_correct"] = market_side_over == actual_over
+            if model_side_over != market_side_over:  # only meaningful when they disagreed
+                log_df.loc[idx, "model_beat_market"] = model_side_over == actual_over
+
+    return log_df
+
+
+def log_props_week(props: pd.DataFrame, week: int, season: int) -> pd.DataFrame:
+    log_df = _load_props_log()
+    log_df = _grade_pending_props(log_df)
+
+    market_backed = props[props["has_line"]] if not props.empty else props
+    rows = []
+    for _, p in market_backed.iterrows():
+        rows.append({
+            "season": season, "week": week,
+            "player": p["player"], "player_id": p["player_id"], "team": p["team"], "opponent": p["opponent"],
+            "stat": p["stat"], "line": p["line"],
+            "market_over_prob": p["market_over_prob"], "model_over_prob": p["model_over_prob"], "edge": p["edge"],
+            "actual_value": pd.NA, "actual_over": pd.NA,
+            "model_correct": pd.NA, "market_correct": pd.NA, "model_beat_market": pd.NA,
+        })
+
+    # re-running the same week overwrites its rows instead of duplicating them
+    log_df = log_df[~((log_df["season"] == season) & (log_df["week"] == week))]
+    log_df = pd.concat([log_df, pd.DataFrame(rows, columns=PROPS_LOG_COLS)], ignore_index=True)
+
+    os.makedirs(os.path.dirname(PROPS_LOG_PATH), exist_ok=True)
+    log_df.to_csv(PROPS_LOG_PATH, index=False)
+    return log_df
+
+
 def get_current_week(season: int = CURRENT_SEASON) -> int:
     """The earliest REG-season week that still has at least one game left to
     play -- i.e. this week, or the upcoming one if the whole season's
@@ -121,6 +248,8 @@ def run_week(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     path = build_report(predictions, week, season, props)
     log_week(predictions, week, season)
     print(f"Logged predictions -> {LOG_PATH}")
+    log_props_week(props, week, season)
+    print(f"Logged props -> {PROPS_LOG_PATH}")
     return path
 
 

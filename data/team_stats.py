@@ -10,7 +10,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from data.opponent_adjust import add_opponent_adjusted_columns, roll_opponent_adjusted
+from data.opponent_adjust import iterative_opponent_adjust
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 SCHEDULES_PATH = os.path.join(CACHE_DIR, "schedules.parquet")
@@ -267,9 +267,9 @@ def build_rolling_team_stats(team_game_stats: pd.DataFrame) -> pd.DataFrame:
     # separate *_adj_avg columns alongside the raw ones above. Lives in
     # this function (not just main()'s CLI path) so live current-season
     # scoring in model/predict.py gets these too, not just the cached
-    # historical parquet.
-    games_adj = add_opponent_adjusted_columns(team_game_stats, result)
-    adj_rolling = roll_opponent_adjusted(games_adj)
+    # historical parquet. Iterative (3-pass) as of Audit Fix Plan Step 4 --
+    # see data/opponent_adjust.py's docstring.
+    adj_rolling = iterative_opponent_adjust(team_game_stats, result)
     result = result.merge(adj_rolling, on=["season", "week", "team"], how="left")
 
     return result

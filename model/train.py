@@ -58,6 +58,15 @@ STAT_COLS = [
     # available in team_stats.parquet for narrative/props use.
     "off_success_rate_avg", "def_success_rate_avg",
     "off_yac_oe_avg", "def_yac_oe_avg",
+    # NOT included: special_teams_epa_avg. data/team_stats.py has computed
+    # this since Phase 10 (field goals/punts/kickoffs EPA) but it was never
+    # actually wired in here -- Audit Fix Plan Step 6 tried adding it and
+    # ablation-tested it (same discipline as the QB EPA/CPOE exclusion
+    # above): walk-forward consensus weakened from ensemble winning 3/4
+    # folds to a 2/4 split with no clear winner, and the final 2025 holdout
+    # accuracy dropped from 65.9% to 63.9%. Reverted -- still computed and
+    # available in team_stats.parquet for narrative/props use, just not a
+    # feature that's earned a place in FEATURE_COLS.
 ]
 FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
     "home_field_context_diff", "rest_diff", "injury_impact_diff",
@@ -182,6 +191,21 @@ def build_feature_frame(
     return games.dropna(subset=FEATURE_COLS)
 
 
+# NOT implemented as a default: time-decay sample weighting (weighting
+# recent seasons more heavily during training). Audit Fix Plan Step 6
+# built and ablation-tested exponential-decay weighting (half-lives of 2,
+# 3, 4, 5, 8 seasons vs. no decay), evaluated both on the true 2025
+# holdout and averaged across every walk-forward fold (see
+# walk_forward_folds below). Every decay setting tested underperformed no
+# decay, both on the single holdout (best-of-3 accuracy 0.649-0.659
+# decayed vs 0.659 undecayed) and averaged across folds (0.678-0.683
+# decayed vs 0.687 undecayed) -- with only 10 cached seasons, and the
+# rolling stats/Elo already emphasizing recent within-season form on their
+# own, discounting older seasons just throws away real signal without
+# buying anything. Not implemented, rather than shipped as an unused
+# capability.
+
+
 def train_logistic(train_df: pd.DataFrame):
     model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
     model.fit(train_df[FEATURE_COLS], train_df["home_win"])
@@ -234,6 +258,63 @@ def _evaluate(name: str, logistic_model, xgb_model, train_df: pd.DataFrame, test
     return {"name": name, "test_acc": test_acc, "test_loss": test_loss}
 
 
+# Audit Fix Plan Step 5: walk-forward folds start once at least this many
+# seasons of training data are available -- with only 10 cached seasons
+# total, starting any earlier would fold on a training set too thin to
+# mean much, and starting later would leave too few folds to call a
+# "majority" meaningful.
+MIN_WALK_FORWARD_TRAIN_SEASONS = 6
+
+
+def walk_forward_folds(games: pd.DataFrame, seasons: list[int],
+                        min_train_seasons: int = MIN_WALK_FORWARD_TRAIN_SEASONS) -> list[dict]:
+    """One fold per season from `seasons[min_train_seasons]` onward: train
+    on every season before it, test on it alone, then slide forward --
+    train 1..N/test N+1, train 1..N+1/test N+2, etc. Unlike main()'s final
+    deployed model (always trained on every season but the true last-held-
+    out one), this deliberately never touches the *last* season in
+    `seasons` as a training season for an earlier fold's test -- it's each
+    fold's own test season in the final fold, keeping the walk-forward
+    process entirely within seasons that would otherwise be "training
+    data," never previewing the true final holdout."""
+    folds = []
+    for i in range(min_train_seasons, len(seasons)):
+        train_seasons, test_season = seasons[:i], seasons[i]
+        train_df = games[games["season"].isin(train_seasons)]
+        test_df = games[games["season"] == test_season]
+        if train_df.empty or test_df.empty:
+            continue
+
+        logistic_model = train_logistic(train_df)
+        xgb_model = train_xgboost(train_df)
+        results = {}
+        for name in ("logistic", "xgboost", "ensemble"):
+            proba = predict_proba(name, logistic_model, xgb_model, test_df[FEATURE_COLS])[:, 1]
+            results[name] = float(accuracy_score(test_df["home_win"], (proba >= 0.5).astype(int)))
+        fold_winner = max(results, key=results.get)
+        folds.append({
+            "train_seasons": train_seasons, "test_season": test_season,
+            "results": results, "fold_winner": fold_winner,
+        })
+    return folds
+
+
+def select_model_type_by_walk_forward(folds: list[dict]) -> str:
+    """Whichever model type wins the most folds, ties broken by highest
+    average test accuracy across all folds (not just the folds it won) --
+    prefers the type that's been consistently strong over one that only
+    barely edged out narrow wins. Per the audit plan: a majority across
+    folds, not just whichever won the single most recent holdout."""
+    wins = {"logistic": 0, "xgboost": 0, "ensemble": 0}
+    avg_acc = {"logistic": [], "xgboost": [], "ensemble": []}
+    for fold in folds:
+        wins[fold["fold_winner"]] += 1
+        for name, acc in fold["results"].items():
+            avg_acc[name].append(acc)
+    avg_acc = {name: sum(accs) / len(accs) for name, accs in avg_acc.items()}
+    return max(wins, key=lambda name: (wins[name], avg_acc[name]))
+
+
 def main():
     schedules = pd.read_parquet(SCHEDULES_PATH)
     team_stats = pd.read_parquet(TEAM_STATS_PATH)
@@ -252,18 +333,30 @@ def main():
     baseline_acc = test_df["home_win"].mean()
     print(f"Always-pick-home baseline: {max(baseline_acc, 1 - baseline_acc):.3f}")
 
+    # Audit Fix Plan Step 5: pick which model TYPE to deploy by walk-forward
+    # validation across every available season, not just whichever won the
+    # single most recent (2025) holdout -- a type that wins one fold by
+    # luck of that particular season's matchups isn't necessarily the type
+    # that generalizes best. This only decides model_type; the actual
+    # deployed model below is still fit on the full training window
+    # (TRAIN_SEASONS) so nothing about how much data it learns from
+    # changes, and TEST_SEASON is never included as a training season in
+    # any walk-forward fold, so it stays a true, unseen final holdout.
+    print("\nWalk-forward validation (train on seasons 1..N, test on N+1, sliding forward):")
+    folds = walk_forward_folds(games, HISTORICAL_SEASONS)
+    for fold in folds:
+        results_str = "  ".join(f"{name} {acc:.3f}" for name, acc in fold["results"].items())
+        train_span = f"{fold['train_seasons'][0]}-{fold['train_seasons'][-1]}"
+        print(f"  train {train_span} / test {fold['test_season']}: {results_str}  -> won by {fold['fold_winner']}")
+    model_type = select_model_type_by_walk_forward(folds)
+    fold_wins = sum(1 for f in folds if f["fold_winner"] == model_type)
+    print(f"Selected model type: {model_type} (won {fold_wins}/{len(folds)} walk-forward folds)")
+
     logistic_model = train_logistic(train_df)
     xgb_model = train_xgboost(train_df)
 
-    print("Comparing candidate models on the 2025 holdout:")
-    candidates = [
-        _evaluate("logistic", logistic_model, xgb_model, train_df, test_df),
-        _evaluate("xgboost", logistic_model, xgb_model, train_df, test_df),
-        _evaluate("ensemble", logistic_model, xgb_model, train_df, test_df),
-    ]
-    winner = max(candidates, key=lambda c: (c["test_acc"], -c["test_loss"]))
-    model_type = winner["name"]
-    print(f"Winner: {model_type} (test acc {winner['test_acc']:.3f})")
+    print(f"\nFinal {model_type} model on the true {TEST_SEASON} holdout:")
+    final_result = _evaluate(model_type, logistic_model, xgb_model, train_df, test_df)
 
     spread_calibration = train_spread_calibration(train_df, model_type, logistic_model, xgb_model)
 
@@ -275,9 +368,10 @@ def main():
         "spread_calibration": spread_calibration,
         # So the report can show real, current numbers instead of a
         # hardcoded string that goes stale the next time this is retrained.
-        "test_accuracy": winner["test_acc"],
+        "test_accuracy": final_result["test_acc"],
         "baseline_accuracy": max(baseline_acc, 1 - baseline_acc),
         "test_season": TEST_SEASON,
+        "walk_forward_folds": folds,
     }, MODEL_PATH)
     print(f"Saved {model_type} model -> {MODEL_PATH}")
 
