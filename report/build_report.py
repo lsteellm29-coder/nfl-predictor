@@ -17,9 +17,10 @@ import pandas as pd
 
 from config import CURRENT_SEASON
 from data.situational import is_short_week
+from report.cards import CARDS_SCRIPT, CARDS_STYLE, espn_headshot_url, game_pick_card_html
 from report.logos import get_logo_url
 from report.narrative import phrase_lead_narrative
-from report.props import PROPS_STYLE, props_section_html
+from report.props import props_section_html
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "model.joblib")
@@ -141,12 +142,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .edge-flat {{ color: #777; }}
   .why {{ font-size: 16.5px; color: #333; margin-top: 18px; line-height: 1.65; }}
   .caveat {{ font-size: 14px; color: #888; margin: -12px 0 28px; max-width: 720px; line-height: 1.5; }}
-{props_style}</style>
+{cards_style}</style>
 </head>
 <body>
 <h1>NFL Week {week} Predictions -- {season}</h1>
-<div class="caveat">This {model_type} model backtested at {test_accuracy} accuracy on the {test_season} season (vs. {baseline_accuracy} for always picking the home team) -- a real edge, but far from certain. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Player props (where posted) use each player's own season rate, adjusted for the opponent's defense-by-position stats and current injury status, against a normal or Poisson distribution depending on the stat. Treat all of this as informed estimates, not guarantees.</div>
+<div class="caveat">This {model_type} model backtested at {test_accuracy} accuracy on the {test_season} season (vs. {baseline_accuracy} for always picking the home team) -- a real edge, but far from certain. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Player props (where posted) use each player's own season rate, adjusted for the opponent's defense-by-position stats and current injury status, against a normal or Poisson distribution depending on the stat. Every "Higher/Lower" and team button below is colored to match what the model actually calculated, not dressed up for effect -- a thin edge shows as a thin edge. Treat all of this as informed estimates, not guarantees.</div>
 {days}
+<script>{cards_script}</script>
 </body>
 </html>
 """
@@ -165,13 +167,7 @@ GAME_TEMPLATE = """<div class="game">
     </div>
     <div class="kickoff">{kickoff}</div>
   </div>
-  <div class="stats">
-    <div>Winner: <span class="winner">{winner}</span> ({win_pct})</div>
-    <div>Vegas: <b>{spread_line}</b> / total {total_line}</div>
-    <div>Moneyline: <b>{moneyline}</b></div>
-    <div>Model: <b>{implied_spread}</b></div>
-    <div>Edge: <b class="{edge_class}">{edge}</b></div>
-  </div>
+  {game_pick_card}
   <div class="stats">
     <div>Likely TD scorer ({away_team}): <b>{away_td_scorer}</b></div>
     <div>Likely TD scorer ({home_team}): <b>{home_td_scorer}</b></div>
@@ -430,7 +426,7 @@ def _game_props(props: pd.DataFrame | None, game: pd.Series) -> pd.DataFrame | N
     return props[(props["team"] == game["home_team"]) | (props["team"] == game["away_team"])]
 
 
-def _row_data(game: pd.Series, props: pd.DataFrame | None = None) -> dict:
+def _row_data(game: pd.Series, props: pd.DataFrame | None = None, headshot_url_fn=espn_headshot_url) -> dict:
     has_pred = pd.notna(game.get("home_win_prob"))
 
     if has_pred:
@@ -448,20 +444,25 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None) -> dict:
             edge_str = f"{edge:+.1f}"
             edge_class = "edge-pos" if edge > 1 else ("edge-neg" if edge < -1 else "edge-flat")
         why = _explain(game, winner)
+        game_pick_card = game_pick_card_html(game.to_dict(), _full_name(game["home_team"]), _full_name(game["away_team"]))
     else:
         winner, win_pct_str, implied_spread_str = "--", "--", "--"
         edge_str, edge_class = "--", "edge-flat"
         why = "Not enough data on one of these teams yet to make a prediction."
+        game_pick_card = ""
+
+    home_full, away_full = _full_name(game["home_team"]), _full_name(game["away_team"])
+    kickoff = _fmt_kickoff(game.get("gameday"), game.get("gametime"), game.get("weekday"))
 
     return {
         "away_team": game["away_team"],
         "home_team": game["home_team"],
-        "away_full": _full_name(game["away_team"]),
-        "home_full": _full_name(game["home_team"]),
+        "away_full": away_full,
+        "home_full": home_full,
         "away_logo": get_logo_url(game["away_team"]),
         "home_logo": get_logo_url(game["home_team"]),
         "coaches": _coach_qb_line(game),
-        "kickoff": _fmt_kickoff(game.get("gameday"), game.get("gametime"), game.get("weekday")),
+        "kickoff": kickoff,
         "winner": winner,
         "win_pct": win_pct_str,
         "spread_line": _fmt_spread(game.get("spread_line")),
@@ -473,7 +474,9 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None) -> dict:
         "away_td_scorer": _fmt_td_scorer(game.get("away_td_scorer")),
         "home_td_scorer": _fmt_td_scorer(game.get("home_td_scorer")),
         "why": why,
-        "props_section": props_section_html(_game_props(props, game)),
+        "game_pick_card": game_pick_card,
+        "props_section": props_section_html(
+            _game_props(props, game), home_full, away_full, kickoff, _full_name, headshot_url_fn),
     }
 
 
@@ -522,7 +525,8 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
 
     metrics = _model_metrics()
     return HTML_TEMPLATE.format(
-        week=week, season=season, days="\n".join(days_html), props_style=PROPS_STYLE,
+        week=week, season=season, days="\n".join(days_html),
+        cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         model_type=metrics["model_type"],
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "an unknown",
         baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "an unknown",

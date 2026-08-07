@@ -59,6 +59,11 @@ def build_position_tables(pbp: pd.DataFrame, pos_map: dict) -> dict:
         "offense_ypt": pass_plays.groupby(["posteam", "recv_pos"])["receiving_yards"].mean().unstack(),
         "rush_def_ypc": rush_plays.groupby("defteam")["rushing_yards"].mean(),
         "rush_off_ypc": rush_plays.groupby("posteam")["rushing_yards"].mean(),
+        # TD rate allowed (per attempt/target) by position -- feeds the
+        # UI's anytime-TD card reasoning ("Nth-most rushing TDs allowed"),
+        # same shape as the yardage tables above.
+        "defense_td_rate": pass_plays.groupby(["defteam", "recv_pos"])["pass_touchdown"].mean().unstack(),
+        "rush_def_td_rate": rush_plays.groupby("defteam")["rush_touchdown"].mean(),
     }
 
 
@@ -126,3 +131,37 @@ def game_mismatches(home: str, away: str, current: dict, fallback: dict) -> list
         team_position_mismatches(home, away, current, fallback)
         + team_position_mismatches(away, home, current, fallback)
     )
+
+
+def _effective_series(current_tbl, current_n, fallback_tbl, fallback_n, min_n, teams, col=None) -> pd.Series:
+    """Each team's current-season-if-enough-else-fallback value, assembled
+    into one Series -- so a league rank computed from it puts every team
+    on a consistent basis instead of comparing some teams' real
+    current-season numbers against others' leftover prior-season ones."""
+    values = {}
+    for team in teams:
+        result = _lookup(current_tbl, current_n, fallback_tbl, fallback_n, team, min_n, col)
+        if result is not None:
+            values[team] = result[0]
+    return pd.Series(values, dtype=float)
+
+
+def defense_rank(current: dict, fallback: dict, team: str, group: str, stat: str = "yards") -> int | None:
+    """1-indexed league rank of how much `team`'s defense allows to
+    `group` (WR/TE/RB, or "RUSH"), `stat` = "yards" or "td_rate" -- 1 =
+    allows the most, matching how "3rd-most yards allowed" is normally
+    phrased. None if the sample's too thin league-wide to rank honestly."""
+    if group == "RUSH":
+        cur_val, cur_n = current["rush_def_ypc" if stat == "yards" else "rush_def_td_rate"], current["rush_def_n"]
+        fb_val, fb_n = fallback["rush_def_ypc" if stat == "yards" else "rush_def_td_rate"], fallback["rush_def_n"]
+        teams = set(cur_val.index) | set(fb_val.index)
+        series = _effective_series(cur_val, cur_n, fb_val, fb_n, MIN_RUSH_ATTEMPTS, teams)
+    else:
+        cur_val = current["defense_ypt" if stat == "yards" else "defense_td_rate"]
+        fb_val = fallback["defense_ypt" if stat == "yards" else "defense_td_rate"]
+        teams = set(current["defense_n"].index) | set(fallback["defense_n"].index)
+        series = _effective_series(cur_val, current["defense_n"], fb_val, fallback["defense_n"],
+                                    MIN_TARGETS[group], teams, group)
+    if team not in series.index or len(series) < 10:
+        return None
+    return int((series > series[team]).sum()) + 1

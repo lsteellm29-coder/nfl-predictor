@@ -20,8 +20,8 @@ from config import CURRENT_SEASON
 from model.player_stats import score_props
 from model.predict import score_week
 from report.build_report import _by_day, _day_header, _model_metrics, _row_data
+from report.cards import CARDS_SCRIPT, CARDS_STYLE
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
-from report.props import PROPS_STYLE
 from run_week import get_current_week
 
 ASSETS_DIR = os.path.join(ROOT_DIR, "report", "assets")
@@ -340,7 +340,7 @@ footer {{
   color: var(--muted);
   line-height: 1.6;
 }}
-{props_style}</style>
+{cards_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -363,6 +363,7 @@ footer {{
     Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
   </footer>
 </div>
+<script>{cards_script}</script>
 </body>
 </html>
 """
@@ -381,18 +382,7 @@ GAME_BLOCK = """<div class="game">
   </div>
   <div class="subline">{coaches}</div>
 
-  <div class="confidence">
-    <div class="track"><div class="fill" style="width:{win_pct_num:.0f}%"></div></div>
-    <div class="caption"><span>Model confidence</span><b>{winner} &mdash; {win_pct}</b></div>
-  </div>
-
-  <div class="tiles">
-    <div class="tile"><div class="label">Vegas</div><div class="value">{spread_line}</div></div>
-    <div class="tile"><div class="label">Total</div><div class="value">{total_line}</div></div>
-    <div class="tile"><div class="label">Moneyline</div><div class="value">{moneyline_compact}</div></div>
-    <div class="tile"><div class="label">Model</div><div class="value">{implied_spread}</div></div>
-    <div class="tile {edge_tile_class}"><div class="label">Edge</div><div class="value">{edge}</div></div>
-  </div>
+  {game_pick_card}
 
   <div class="tdwatch">
     <div class="chip"><span class="pct">{away_td_pct}</span><span class="team">{away_team} &middot; {away_td_name}</span></div>
@@ -410,13 +400,6 @@ def td_chip_parts(pred):
     return f"{pred['prob'] * 100:.0f}%", pred["player"]
 
 
-def moneyline_compact(game) -> str:
-    home_ml, away_ml = game.get("home_moneyline"), game.get("away_moneyline")
-    if pd.isna(home_ml) or pd.isna(away_ml):
-        return "--"
-    return f"{home_ml:+.0f} / {away_ml:+.0f}"
-
-
 def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     if week is None:
         week = get_current_week(season)
@@ -428,28 +411,25 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     for day, weekday, day_games in _by_day(predictions):
         game_htmls = []
         for _, game in day_games.iterrows():
-            d = _row_data(game, props)
+            # headshot_url_fn=None: external images can't load in a
+            # self-contained Artifact, so prop cards fall back to an
+            # initials avatar instead of the live ESPN CDN URL.
+            d = _row_data(game, props, headshot_url_fn=None)
             d["away_logo"] = embed(game["away_team"])
             d["home_logo"] = embed(game["home_team"])
-            win_pct_num = float(d["win_pct"].rstrip("%")) if d["win_pct"] != "--" else 50.0
             away_td_pct, away_td_name = td_chip_parts(game.get("away_td_scorer"))
             home_td_pct, home_td_name = td_chip_parts(game.get("home_td_scorer"))
-            edge_val = game.get("edge")
-            edge_tile_class = ""
-            if edge_val is not None and pd.notna(edge_val):
-                edge_tile_class = "edge-pos" if edge_val > 1 else ("edge-neg" if edge_val < -1 else "")
             game_htmls.append(GAME_BLOCK.format(
-                **d, win_pct_num=win_pct_num,
-                away_td_pct=away_td_pct, away_td_name=away_td_name,
+                **d, away_td_pct=away_td_pct, away_td_name=away_td_name,
                 home_td_pct=home_td_pct, home_td_name=home_td_name,
-                edge_tile_class=edge_tile_class, moneyline_compact=moneyline_compact(game),
             ))
         days_html.append(DAY_BLOCK.format(day_header=_day_header(day, weekday), games="\n".join(game_htmls)))
 
     metrics = _model_metrics()
     html = PAGE.format(
         week=week, season=season, n_games=n_games,
-        days="\n".join(days_html), oswald_b64=OSWALD_B64, props_style=PROPS_STYLE,
+        days="\n".join(days_html), oswald_b64=OSWALD_B64,
+        cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         model_type=metrics["model_type"],
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
         baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "N/A",

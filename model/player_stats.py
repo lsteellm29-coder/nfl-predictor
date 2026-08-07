@@ -20,7 +20,7 @@ from config import CURRENT_SEASON
 from data.fetch_injuries import USAGE_MULTIPLIER, fetch_current_player_injury_status
 from data.fetch_props import fetch_props_for_week
 from data.fetch_week import fetch_week
-from data.positional_matchups import build_position_tables, position_map
+from data.positional_matchups import POSITION_GROUPS, build_position_tables, defense_rank, position_map
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PBP_PATH = os.path.join(ROOT_DIR, "data", "cache", "pbp.parquet")
@@ -81,6 +81,21 @@ def team_pass_yards_allowed(pbp: pd.DataFrame) -> pd.Series:
     dropbacks = pbp[(pbp["qb_dropback"] == 1) & pbp["defteam"].notna()]
     per_game = dropbacks.groupby(["season", "week", "defteam"])["passing_yards"].sum().reset_index()
     return per_game.groupby("defteam")["passing_yards"].mean()
+
+
+def _rank_series(current: pd.Series, fallback: pd.Series, team: str) -> int | None:
+    """1-indexed league rank (1 = allows the most) for a flat team ->
+    value Series, using each team's current-if-available-else-fallback
+    number -- same UI-reasoning purpose as data/positional_matchups.py's
+    defense_rank(), just for the flat (non-position-grouped) pass-defense
+    case."""
+    teams = set(current.index) | set(fallback.index)
+    values = {t: current.get(t, fallback.get(t)) for t in teams}
+    values = {t: v for t, v in values.items() if v is not None and pd.notna(v)}
+    if team not in values or len(values) < 10:
+        return None
+    series = pd.Series(values)
+    return int((series > series[team]).sum()) + 1
 
 
 def _player_season_avg(game_log: pd.DataFrame, id_col: str, name_col: str, stat_cols: list) -> dict:
@@ -201,6 +216,7 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     rosters = rosters[rosters["player_id"] != ""]
     name_to_id = dict(zip(rosters["player_name"], rosters["player_id"]))
     name_to_team = dict(zip(rosters["player_name"], rosters["team"]))
+    name_to_espn_id = dict(zip(rosters["player_name"], rosters["espn_id"]))
     pos_map = dict(zip(rosters["player_id"], rosters["position"]))
 
     fallback_pbp = _fallback_season_pbp(season)
@@ -239,6 +255,9 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             continue
         opponent = m["away_team"] if team == m["home_team"] else m["home_team"]
 
+        position = pos_map.get(player_id)
+        reasoning = None
+
         if m["stat"] == "pass_yards":
             rec = _lookup_player_avg(qb_avg_current, qb_avg_fallback, player_id)
             if rec is None:
@@ -247,6 +266,9 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             factor = _matchup_factor(None, def_val, league_pass_def_fallback)
             mean = apply_injury_usage(rec["pass_yards_avg"] * factor, player_id, injury_status)
             proj = project_yardage(mean, m["line"], "pass_yards")
+            rank = _rank_series(pass_def_current, pass_def_fallback, opponent)
+            if rank is not None:
+                reasoning = {"kind": "yards", "group": None, "rank": rank}
 
         elif m["stat"] == "rush_yards":
             rec = _lookup_player_avg(rb_avg_current, rb_avg_fallback, player_id)
@@ -257,6 +279,9 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             factor = _matchup_factor(None, def_val, league_avg)
             mean = apply_injury_usage(rec["rush_yards_avg"] * factor, player_id, injury_status)
             proj = project_yardage(mean, m["line"], "rush_yards")
+            rank = defense_rank(pos_tables_current, pos_tables_fallback, opponent, "RUSH", "yards")
+            if rank is not None:
+                reasoning = {"kind": "yards", "group": "RUSH", "rank": rank}
 
         elif m["stat"] in ("receptions", "rec_yards"):
             rec = _lookup_player_avg(rec_avg_current, rec_avg_fallback, player_id)
@@ -278,6 +303,10 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             else:
                 mean = apply_injury_usage(rec["rec_yards_avg"] * factor, player_id, injury_status)
                 proj = project_yardage(mean, m["line"], "rec_yards")
+            if pos in POSITION_GROUPS:
+                rank = defense_rank(pos_tables_current, pos_tables_fallback, opponent, pos, "yards")
+                if rank is not None:
+                    reasoning = {"kind": "yards", "group": pos, "rank": rank}
 
         elif m["stat"] == "anytime_td":
             rb_rec = _lookup_player_avg(rb_avg_current, rb_avg_fallback, player_id)
@@ -288,15 +317,27 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
                 continue
             mean = apply_injury_usage(rush_tds + rec_tds, player_id, injury_status)
             proj = project_count(mean, 0.5)
+            # Whichever role (ground or through the air) drives more of this
+            # player's own TD rate decides which matchup rank the card cites.
+            td_group = "RUSH" if rush_tds >= rec_tds else (position if position in POSITION_GROUPS else None)
+            if td_group is not None:
+                rank = defense_rank(pos_tables_current, pos_tables_fallback, opponent, td_group, "td_rate")
+                if rank is not None:
+                    reasoning = {"kind": "td_rate", "group": td_group, "rank": rank}
 
         else:
             continue
 
+        injury = injury_status.get(player_id)
+        espn_id = name_to_espn_id.get(m["player"])
         rows.append({
             "player": m["player"], "stat": m["stat"], "team": team, "opponent": opponent,
-            "line": m["line"], "market_price": m["market_price"], "market_over_prob": m["market_over_prob"],
+            "position": position, "espn_id": espn_id, "line": m["line"], "market_price": m["market_price"],
+            "market_over_prob": m["market_over_prob"],
             "projection": proj["projection"], "model_over_prob": proj["over_prob"],
             "edge": proj["over_prob"] - m["market_over_prob"],
+            "reasoning": reasoning,
+            "injury_status": injury["status"] if injury else None,
         })
 
     return pd.DataFrame(rows)
