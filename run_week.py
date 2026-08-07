@@ -13,8 +13,10 @@ import os
 
 import nfl_data_py as nfl
 import pandas as pd
+import requests
 
 from config import CURRENT_SEASON
+from data.fetch_news import fetch_news
 from model.player_stats import score_props
 from model.predict import score_week
 from report.build_report import build_report
@@ -245,7 +247,12 @@ def run_week(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         week = get_current_week(season)
     predictions = score_week(week, season)
     props = score_props(week, season)
-    path = build_report(predictions, week, season, props)
+    try:
+        news = fetch_news()
+    except requests.RequestException as e:
+        print(f"Warning: couldn't fetch live news ({e}); reporting without it.")
+        news = None
+    path = build_report(predictions, week, season, props, news)
     log_week(predictions, week, season)
     print(f"Logged predictions -> {LOG_PATH}")
     log_props_week(props, week, season)

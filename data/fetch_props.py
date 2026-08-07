@@ -1,27 +1,23 @@
-# pulls player prop lines (yards, receptions, anytime TD) for the week
-"""Player prop odds from The Odds API. Unlike the game lines in
-data/fetch_week.py (one bulk /odds call for the whole week), player props
+# pulls player prop lines (yards, receptions, anytime TD) + alternate game lines for the week
+"""Player prop odds and alternate game lines (alternate spreads/totals,
+team totals) from The Odds API. Unlike the core game lines in
+data/fetch_week.py (one bulk /odds call for the whole week), all of these
 only live on the per-event odds endpoint, so this costs one API call per
 game -- games (with an `event_id` column) come from data/fetch_week.py's
 output, which already threads the event id through from the same bulk
-call used for game lines, at no extra cost.
+call used for game lines, at no extra cost. Alternate lines are requested
+in the same per-event call as player props (The Odds API prices both at
+the event-scoped endpoint) so adding them costs nothing beyond what props
+already needed.
 """
 
 import pandas as pd
 import requests
 
 from config import ODDS_API_KEY
+from data.odds_aggregation import aggregate_one_sided, aggregate_two_sided, american_to_prob, devig_pair, ladder_by_point
 
 EVENT_ODDS_URL = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event_id}/odds"
-
-# Real sportsbooks (DraftKings, William Hill) mostly only post
-# anytime-TD odds this far before kickoff -- yardage/reception lines
-# don't show up there yet, but they're already live at DFS-style books
-# (PrizePicks, Underdog, betr), which is why fetch_event_props queries
-# the us_dfs region too. When more than one book has the same
-# (player, stat) priced, this order decides which price wins, so the
-# choice stays consistent week to week instead of picking arbitrarily.
-PREFERRED_BOOK_ORDER = ["draftkings", "fanduel", "williamhill_us", "prizepicks", "underdog", "betr_us_dfs"]
 
 # Odds API market key -> our internal stat name. Must match the stat
 # names model/player_stats.py's score_props() and report/cards.py's
@@ -38,8 +34,16 @@ PROP_MARKETS = {
     "player_anytime_td": "anytime_td",
 }
 
+# Alternate game lines -- game-level, not player-level, so they're parsed
+# separately (parse_alt_lines) from player props. team_totals currently
+# returns zero books this far before kickoff (checked live -- every book
+# queried has it absent, not just thin), but the request costs nothing
+# extra to include, so it's left in: it'll start returning real data on
+# its own once books post it, with no code change needed here.
+ALT_LINE_MARKETS = ["alternate_spreads", "alternate_totals", "team_totals"]
 
-def fetch_event_props(event_id: str) -> dict:
+
+def fetch_event_odds(event_id: str) -> dict:
     if not ODDS_API_KEY:
         raise RuntimeError("ODDS_API_KEY not set (expected in .env)")
     resp = requests.get(
@@ -49,12 +53,11 @@ def fetch_event_props(event_id: str) -> dict:
             # us_dfs (PrizePicks/Underdog/betr) is where yardage and
             # reception props actually get posted this far out -- us/us2
             # sportsbooks mostly only have anytime-TD priced yet.
-            # Fetching all three and merging in parse_event_props gets
-            # every real line that's live anywhere, instead of the
-            # single-region call silently missing markets that exist,
-            # just not at a traditional sportsbook.
+            # Fetching all three regions gets every real line that's live
+            # anywhere, instead of a single-region call silently missing
+            # markets that exist, just not at a traditional sportsbook.
             "regions": "us,us2,us_dfs",
-            "markets": ",".join(PROP_MARKETS),
+            "markets": ",".join(list(PROP_MARKETS) + ALT_LINE_MARKETS),
             "oddsFormat": "american",
         },
         timeout=15,
@@ -63,47 +66,21 @@ def fetch_event_props(event_id: str) -> dict:
     return resp.json()
 
 
-def _ordered_bookmakers(bookmakers: list[dict]) -> list[dict]:
-    def rank(book: dict) -> int:
-        try:
-            return PREFERRED_BOOK_ORDER.index(book["key"])
-        except ValueError:
-            return len(PREFERRED_BOOK_ORDER)
-    return sorted(bookmakers, key=rank)
-
-
-def american_to_prob(price: float) -> float:
-    return 100 / (price + 100) if price > 0 else -price / (-price + 100)
-
-
-def _devig_pair(over_price: float, under_price: float) -> tuple[float, float]:
-    """Removes the bookmaker's overround by normalizing both sides'
-    implied probabilities to sum to 1 -- without this, comparing a model
-    probability against a single raw vig-inflated line probability would
-    understate every "edge" by the book's built-in margin."""
-    over_p, under_p = american_to_prob(over_price), american_to_prob(under_price)
-    total = over_p + under_p
-    return over_p / total, under_p / total
-
-
 def parse_event_props(raw: dict) -> pd.DataFrame:
-    """One row per (player, stat, side) -- side is "over"/"under" for
-    yardage/reception markets, "yes" for anytime_td (usually one-sided).
-    Merges across every bookmaker in the response rather than picking a
-    single one: real sportsbooks and DFS-style books post different
-    markets this far before kickoff (see fetch_event_props), so limiting
-    to one book meant real, currently-live lines at a different book
-    read as "not posted" when they actually were. Each (player, stat) is
-    only taken once, from the highest-priority book that has it
-    (PREFERRED_BOOK_ORDER), so the source is still consistent from week
-    to week rather than arbitrary."""
-    books = _ordered_bookmakers(raw.get("bookmakers", []))
+    """One row per (player, stat): the consensus line/probability
+    aggregated across every book quoting it (data/odds_aggregation.py),
+    rather than picking a single book -- real sportsbooks and DFS-style
+    books post different markets this far before kickoff (see
+    fetch_event_odds), so most (player, stat) pairs only have one book
+    quoting them yet anyway; aggregation naturally reduces to that one
+    book's number today and will average across more as books add
+    coverage closer to kickoff, with no code change needed."""
+    books = raw.get("bookmakers", [])
     if not books:
-        return pd.DataFrame(columns=["player", "stat", "side", "line", "price", "prob"])
+        return pd.DataFrame(columns=["player", "stat", "side", "line", "price", "prob", "n_books"])
 
-    rows = []
-    seen_td = set()
-    seen_ou = set()
+    td_prices: dict[str, list[float]] = {}
+    ou_quotes: dict[tuple[str, str], list[dict]] = {}
     for book in books:
         for market in book.get("markets", []):
             stat = PROP_MARKETS.get(market["key"])
@@ -112,56 +89,118 @@ def parse_event_props(raw: dict) -> pd.DataFrame:
             outcomes = market["outcomes"]
             if stat == "anytime_td":
                 for o in outcomes:
-                    if o["name"] != "Yes" or o["description"] in seen_td:
+                    if o["name"] != "Yes":
                         continue
-                    seen_td.add(o["description"])
-                    rows.append({
-                        "player": o["description"], "stat": stat, "side": "yes",
-                        "line": None, "price": o["price"], "prob": american_to_prob(o["price"]),
-                    })
+                    td_prices.setdefault(o["description"], []).append(o["price"])
                 continue
 
             by_player: dict[str, dict] = {}
             for o in outcomes:
                 by_player.setdefault(o["description"], {})[o["name"]] = o
             for player, sides in by_player.items():
-                key = (player, stat)
-                if key in seen_ou:
-                    continue
                 over, under = sides.get("Over"), sides.get("Under")
                 if not over or not under:
                     continue
-                seen_ou.add(key)
-                over_prob, under_prob = _devig_pair(over["price"], under["price"])
-                rows.append({"player": player, "stat": stat, "side": "over",
-                             "line": over["point"], "price": over["price"], "prob": over_prob})
-                rows.append({"player": player, "stat": stat, "side": "under",
-                             "line": under["point"], "price": under["price"], "prob": under_prob})
+                ou_quotes.setdefault((player, stat), []).append(
+                    {"point": over["point"], "price_a": over["price"], "price_b": under["price"]})
+
+    rows = []
+    for player, prices in td_prices.items():
+        agg = aggregate_one_sided(prices)
+        rows.append({"player": player, "stat": "anytime_td", "side": "yes",
+                     "line": None, "price": agg["price"], "prob": agg["prob"], "n_books": agg["n_books"]})
+    for (player, stat), quotes in ou_quotes.items():
+        agg = aggregate_two_sided(quotes)
+        rows.append({"player": player, "stat": stat, "side": "over",
+                     "line": agg["point"], "price": agg["price_a"], "prob": agg["prob_a"], "n_books": agg["n_books"]})
+        rows.append({"player": player, "stat": stat, "side": "under",
+                     "line": agg["point"], "price": agg["price_b"], "prob": agg["prob_b"], "n_books": agg["n_books"]})
 
     return pd.DataFrame(rows)
 
 
-def fetch_props_for_week(games: pd.DataFrame) -> pd.DataFrame:
+def parse_alt_lines(raw: dict, home_team: str, away_team: str) -> dict:
+    """Alternate spreads/totals as full ladders (data/odds_aggregation.py's
+    ladder_by_point -- one multi-book-aggregated rung per point value),
+    plus team totals whenever a book actually has them priced. Game-level,
+    not player-level, so this is kept separate from parse_event_props.
+    Each rung's n_books tells a caller how many books actually agree that
+    specific point exists -- most rungs are n_books=1 this far before
+    kickoff (see ALT_LINE_MARKETS), which is real, not a bug: only a
+    couple of books have posted a genuine ladder yet this far out."""
+    home_name = raw.get("home_team")
+    result = {"alternate_spreads": [], "alternate_totals": [], "team_totals": []}
+
+    spread_quotes, total_quotes = [], []
+    home_team_total_quotes, away_team_total_quotes = [], []
+    for book in raw.get("bookmakers", []):
+        for market in book.get("markets", []):
+            outcomes = market["outcomes"]
+            if market["key"] == "alternate_spreads":
+                by_point: dict[float, dict] = {}
+                for o in outcomes:
+                    by_point.setdefault(o["point"] if o["name"] == home_name else -o["point"], {})[
+                        "home" if o["name"] == home_name else "away"] = o
+                for point, sides in by_point.items():
+                    if "home" in sides and "away" in sides:
+                        spread_quotes.append({"point": point, "price_a": sides["home"]["price"], "price_b": sides["away"]["price"]})
+            elif market["key"] == "alternate_totals":
+                by_point: dict[float, dict] = {}
+                for o in outcomes:
+                    by_point.setdefault(o["point"], {})[o["name"]] = o
+                for point, sides in by_point.items():
+                    if "Over" in sides and "Under" in sides:
+                        total_quotes.append({"point": point, "price_a": sides["Over"]["price"], "price_b": sides["Under"]["price"]})
+            elif market["key"] == "team_totals":
+                by_team_point: dict[tuple[str, float], dict] = {}
+                for o in outcomes:
+                    team = o.get("description")
+                    by_team_point.setdefault((team, o["point"]), {})[o["name"]] = o
+                for (team, point), sides in by_team_point.items():
+                    if "Over" not in sides or "Under" not in sides:
+                        continue
+                    quote = {"point": point, "price_a": sides["Over"]["price"], "price_b": sides["Under"]["price"]}
+                    (home_team_total_quotes if team == home_name else away_team_total_quotes).append(quote)
+
+    result["alternate_spreads"] = ladder_by_point(spread_quotes)
+    result["alternate_totals"] = ladder_by_point(total_quotes)
+    result["team_totals"] = {
+        "home": ladder_by_point(home_team_total_quotes),
+        "away": ladder_by_point(away_team_total_quotes),
+    }
+    return result
+
+
+def fetch_props_for_week(games: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """games: data/fetch_week.py's output (needs event_id, home_team,
-    away_team). Returns every parsed prop row across the week's games, or
-    an empty frame for games whose event_id is missing (no odds posted
-    yet) or whose prop call errors -- a missing week of props shouldn't
-    take down the whole report."""
+    away_team). Returns (props_df, alt_lines_by_event) -- props_df is
+    every parsed prop row across the week's games (empty frame for games
+    whose event_id is missing or whose call errors, so a missing week of
+    props shouldn't take down the whole report); alt_lines_by_event is
+    keyed by event_id, each value parse_alt_lines' output. Alt-line data
+    is fetched and available here but not yet wired into a UI display --
+    see parse_alt_lines' docstring on why most rungs are thin (n_books=1)
+    this far before kickoff; building a full ladder display around data
+    that's mostly one book's number yet would be featuring something
+    that isn't really live."""
     frames = []
+    alt_lines_by_event = {}
     for _, game in games.iterrows():
         event_id = game.get("event_id")
         if pd.isna(event_id):
             continue
         try:
-            raw = fetch_event_props(event_id)
+            raw = fetch_event_odds(event_id)
         except requests.RequestException:
             continue
         props = parse_event_props(raw)
-        if props.empty:
-            continue
-        props["home_team"] = game["home_team"]
-        props["away_team"] = game["away_team"]
-        frames.append(props)
+        if not props.empty:
+            props["home_team"] = game["home_team"]
+            props["away_team"] = game["away_team"]
+            frames.append(props)
+        alt_lines_by_event[event_id] = parse_alt_lines(raw, game["home_team"], game["away_team"])
     if not frames:
-        return pd.DataFrame(columns=["player", "stat", "side", "line", "price", "prob", "home_team", "away_team"])
-    return pd.concat(frames, ignore_index=True)
+        props_df = pd.DataFrame(columns=["player", "stat", "side", "line", "price", "prob", "n_books", "home_team", "away_team"])
+    else:
+        props_df = pd.concat(frames, ignore_index=True)
+    return props_df, alt_lines_by_event

@@ -20,6 +20,7 @@ from data.situational import is_short_week
 from report.cards import CARDS_SCRIPT, CARDS_STYLE, espn_headshot_url, game_pick_card_html
 from report.logos import get_logo_url
 from report.narrative import phrase_lead_narrative
+from report.news_section import NEWS_STYLE, news_section_html
 from report.props import props_section_html
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
@@ -142,11 +143,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .edge-flat {{ color: #777; }}
   .why {{ font-size: 16.5px; color: #333; margin-top: 18px; line-height: 1.65; }}
   .caveat {{ font-size: 14px; color: #888; margin: -12px 0 28px; max-width: 720px; line-height: 1.5; }}
-{cards_style}</style>
+{cards_style}
+{news_style}</style>
 </head>
 <body>
 <h1>NFL Week {week} Predictions -- {season}</h1>
 <div class="caveat">This {model_type} model backtested at {test_accuracy} accuracy on the {test_season} season (vs. {baseline_accuracy} for always picking the home team) -- a real edge, but far from certain. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Player props (where posted) use each player's own season rate, adjusted for the opponent's defense-by-position stats and current injury status, against a normal or Poisson distribution depending on the stat. Every "Higher/Lower" and team button below is colored to match what the model actually calculated, not dressed up for effect -- a thin edge shows as a thin edge. Treat all of this as informed estimates, not guarantees.</div>
+{news_section}
 {days}
 <script>{cards_script}</script>
 </body>
@@ -518,7 +521,8 @@ def print_report(predictions: pd.DataFrame, week: int, season: int) -> None:
             print(textwrap.fill(d["why"], width=78, initial_indent="    ", subsequent_indent="    "))
 
 
-def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: pd.DataFrame | None = None) -> str:
+def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: pd.DataFrame | None = None,
+                       news: list[dict] | None = None) -> str:
     days_html = []
     for day, weekday, day_games in _by_day(predictions):
         games_html = "\n".join(GAME_TEMPLATE.format(**_row_data(g, props)) for _, g in day_games.iterrows())
@@ -528,6 +532,7 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
     return HTML_TEMPLATE.format(
         week=week, season=season, days="\n".join(days_html),
         cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
+        news_style=NEWS_STYLE, news_section=news_section_html(news),
         model_type=metrics["model_type"],
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "an unknown",
         baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "an unknown",
@@ -535,17 +540,19 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
     )
 
 
-def save_report(predictions: pd.DataFrame, week: int, season: int = CURRENT_SEASON, props: pd.DataFrame | None = None) -> str:
+def save_report(predictions: pd.DataFrame, week: int, season: int = CURRENT_SEASON, props: pd.DataFrame | None = None,
+                 news: list[dict] | None = None) -> str:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(OUTPUT_DIR, f"week_{week}_{season}.html")
     with open(path, "w") as f:
-        f.write(build_html_report(predictions, week, season, props))
+        f.write(build_html_report(predictions, week, season, props, news))
     return path
 
 
-def build_report(predictions: pd.DataFrame, week: int, season: int = CURRENT_SEASON, props: pd.DataFrame | None = None) -> str:
+def build_report(predictions: pd.DataFrame, week: int, season: int = CURRENT_SEASON, props: pd.DataFrame | None = None,
+                  news: list[dict] | None = None) -> str:
     print_report(predictions, week, season)
-    path = save_report(predictions, week, season, props)
+    path = save_report(predictions, week, season, props, news)
     print(f"\nSaved report -> {path}")
     return path
 

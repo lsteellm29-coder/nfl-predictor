@@ -12,9 +12,9 @@ import pandas as pd
 import requests
 
 from config import CURRENT_SEASON, ODDS_API_KEY
+from data.odds_aggregation import aggregate_two_sided
 
 ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/"
-PREFERRED_BOOK = "draftkings"
 
 SCHEDULE_COLS = [
     "game_id", "season", "week", "gameday", "gametime", "weekday",
@@ -47,7 +47,11 @@ def fetch_odds_events() -> list[dict]:
         ODDS_API_URL,
         params={
             "apiKey": ODDS_API_KEY,
-            "regions": "us",
+            # us2 (BetRivers, Bally Bet, Hard Rock, etc.) roughly doubles
+            # book coverage over us alone -- more books for _parse_event's
+            # aggregation to average across, same fix as the multi-region
+            # player-props call already makes.
+            "regions": "us,us2",
             "markets": "h2h,spreads,totals",
             "oddsFormat": "american",
         },
@@ -57,49 +61,60 @@ def fetch_odds_events() -> list[dict]:
     return resp.json()
 
 
-def _pick_bookmaker(bookmakers: list[dict]) -> dict | None:
-    if not bookmakers:
-        return None
-    for book in bookmakers:
-        if book["key"] == PREFERRED_BOOK:
-            return book
-    return bookmakers[0]
-
-
 def _parse_event(event: dict, name_to_abbr: dict) -> dict:
+    """Aggregates every book in the response rather than picking a single
+    one (see data/odds_aggregation.py) -- moneyline/spread/total each get
+    the consensus line and a de-vigged probability averaged across
+    whichever books agree on it, so one book's stale or outlier price
+    can't single-handedly become "the market" for this game."""
     home_name, away_name = event["home_team"], event["away_team"]
     row = {
         "event_id": event.get("id"),
         "home_team": name_to_abbr.get(home_name, home_name),
         "away_team": name_to_abbr.get(away_name, away_name),
-        "book": None,
-        "home_moneyline": None,
-        "away_moneyline": None,
-        "spread_line": None,
-        "total_line": None,
+        "n_books": len(event.get("bookmakers", [])),
+        "home_moneyline": None, "away_moneyline": None, "home_ml_prob": None,
+        "spread_line": None, "spread_n_books": None,
+        "total_line": None, "total_n_books": None,
     }
 
-    book = _pick_bookmaker(event.get("bookmakers", []))
-    if not book:
-        return row
-    row["book"] = book["key"]
-
-    for market in book["markets"]:
-        outcomes = market["outcomes"]
-        if market["key"] == "h2h":
-            for o in outcomes:
-                if o["name"] == home_name:
-                    row["home_moneyline"] = o["price"]
-                elif o["name"] == away_name:
-                    row["away_moneyline"] = o["price"]
-        elif market["key"] == "spreads":
-            for o in outcomes:
-                if o["name"] == home_name:
+    h2h_quotes, spread_quotes, total_quotes = [], [], []
+    for book in event.get("bookmakers", []):
+        for market in book.get("markets", []):
+            outcomes = market["outcomes"]
+            if market["key"] == "h2h":
+                home_o = next((o for o in outcomes if o["name"] == home_name), None)
+                away_o = next((o for o in outcomes if o["name"] == away_name), None)
+                if home_o and away_o:
+                    h2h_quotes.append({"point": 0.0, "price_a": home_o["price"], "price_b": away_o["price"]})
+            elif market["key"] == "spreads":
+                home_o = next((o for o in outcomes if o["name"] == home_name), None)
+                away_o = next((o for o in outcomes if o["name"] == away_name), None)
+                if home_o and away_o:
                     # sportsbooks quote negative = favorite; flip so
                     # positive = home favored, matching team_stats.py
-                    row["spread_line"] = -o["point"]
-        elif market["key"] == "totals":
-            row["total_line"] = outcomes[0]["point"]
+                    spread_quotes.append({"point": -home_o["point"], "price_a": home_o["price"], "price_b": away_o["price"]})
+            elif market["key"] == "totals":
+                over_o = next((o for o in outcomes if o["name"] == "Over"), None)
+                under_o = next((o for o in outcomes if o["name"] == "Under"), None)
+                if over_o and under_o:
+                    total_quotes.append({"point": over_o["point"], "price_a": over_o["price"], "price_b": under_o["price"]})
+
+    h2h_agg = aggregate_two_sided(h2h_quotes)
+    if h2h_agg:
+        row["home_moneyline"] = h2h_agg["price_a"]
+        row["away_moneyline"] = h2h_agg["price_b"]
+        row["home_ml_prob"] = h2h_agg["prob_a"]
+
+    spread_agg = aggregate_two_sided(spread_quotes)
+    if spread_agg:
+        row["spread_line"] = spread_agg["point"]
+        row["spread_n_books"] = spread_agg["n_books"]
+
+    total_agg = aggregate_two_sided(total_quotes)
+    if total_agg:
+        row["total_line"] = total_agg["point"]
+        row["total_n_books"] = total_agg["n_books"]
 
     return row
 
@@ -126,8 +141,8 @@ def main():
     args = parser.parse_args()
 
     games = fetch_week(args.week, args.season)
-    cols = ["away_team", "home_team", "gameday", "spread_line",
-            "home_moneyline", "away_moneyline", "total_line", "book"]
+    cols = ["away_team", "home_team", "gameday", "spread_line", "spread_n_books",
+            "home_moneyline", "away_moneyline", "total_line", "total_n_books"]
     print(games[cols].to_string(index=False))
 
 

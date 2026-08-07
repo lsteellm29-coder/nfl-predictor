@@ -16,12 +16,16 @@ import pandas as pd
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT_DIR)
 
+import requests
+
 from config import CURRENT_SEASON
+from data.fetch_news import fetch_news
 from model.player_stats import score_props
 from model.predict import score_week
 from report.build_report import _by_day, _day_header, _model_metrics, _row_data
 from report.cards import CARDS_SCRIPT, CARDS_STYLE
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
+from report.news_section import NEWS_STYLE, news_section_html
 from run_week import get_current_week
 
 ASSETS_DIR = os.path.join(ROOT_DIR, "report", "assets")
@@ -348,7 +352,8 @@ footer {{
   color: var(--muted);
   line-height: 1.6;
 }}
-{cards_style}</style>
+{cards_style}
+{news_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -363,7 +368,9 @@ footer {{
     <div class="stat"><div class="num">{n_games}</div><div class="label">Games this week</div></div>
   </div>
 
-  <div class="caveat">A {model_type} model trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record), Elo ratings, injury reports, and weather, versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Informed estimates, not guarantees.</div>
+  <div class="caveat">{model_type_article} {model_type} model trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record), Elo ratings, injury reports, and weather, versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Informed estimates, not guarantees.</div>
+
+  {news_section}
 
   {days}
 
@@ -415,6 +422,12 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     props = score_props(week, season)
     n_games = len(predictions)
 
+    try:
+        news = fetch_news()
+    except requests.RequestException as e:
+        print(f"Warning: couldn't fetch live news ({e}); publishing without it.")
+        news = None
+
     days_html = []
     for day, weekday, day_games in _by_day(predictions):
         game_htmls = []
@@ -436,11 +449,15 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         days_html.append(DAY_BLOCK.format(day_header=_day_header(day, weekday), games="\n".join(game_htmls)))
 
     metrics = _model_metrics()
+    # "xgboost" is read aloud as "ex-gee-boost" (vowel sound) same as
+    # "ensemble" -- only "logistic" actually wants "a", not "an".
+    model_type_article = "An" if metrics["model_type"] in ("ensemble", "xgboost") else "A"
     html = PAGE.format(
         week=week, season=season, n_games=n_games,
         days="\n".join(days_html), oswald_b64=OSWALD_B64,
         cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
-        model_type=metrics["model_type"],
+        news_style=NEWS_STYLE, news_section=news_section_html(news),
+        model_type=metrics["model_type"], model_type_article=model_type_article,
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
         baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "N/A",
         test_season=metrics["test_season"] or "recent",

@@ -355,7 +355,14 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     to an empty frame, which is exactly the "games missing props entirely"
     problem this section exists to fix."""
     games = fetch_week(week, season)
-    props = fetch_props_for_week(games)
+    props, alt_lines_by_event = fetch_props_for_week(games)
+    # Alternate spreads/totals/team totals (Live News & Expanded Odds
+    # spec) travel with the returned frame via .attrs rather than
+    # changing this function's return type -- real, multi-book-aggregated
+    # data (data/fetch_props.py's parse_alt_lines), but not yet surfaced
+    # in a UI: this far before kickoff most of it is a single book's
+    # number (see that module's docstring), so there isn't enough real
+    # ladder data yet to build a display around without overstating it.
     market = _pivot_market_props(props) if not props.empty else pd.DataFrame(
         columns=["player", "stat", "line", "market_price", "market_over_prob", "home_team", "away_team"])
 
@@ -575,4 +582,6 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         for entry in coverage_gaps:
             print(f"  - {entry}")
 
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    result.attrs["alt_lines_by_event"] = alt_lines_by_event
+    return result

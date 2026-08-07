@@ -114,11 +114,14 @@ def _espn_athlete_id(athlete: dict) -> str | None:
     return None
 
 
-def _espn_id_to_gsis_id(seasons: list[int]) -> dict:
+def espn_id_to_gsis_id(seasons: list[int]) -> dict:
     """ESPN athlete id -> GSIS player_id (the id space pbp's
     passer_player_id/rusher_player_id/receiver_player_id use), via the
     seasonal roster table's espn_id column -- the only place these two id
-    spaces are linked."""
+    spaces are linked. Public (not just used within this module) since
+    data/fetch_news.py's cross_check_against_injuries() needs the same
+    crosswalk to resolve a news headline's tagged athlete id back to a
+    player already known to this codebase."""
     rosters = nfl.import_seasonal_rosters(seasons)
     rosters = rosters[rosters["espn_id"].notna() & (rosters["player_id"] != "")]
     return dict(zip(rosters["espn_id"].astype(str), rosters["player_id"]))
@@ -130,7 +133,7 @@ def fetch_current_player_injury_status(seasons: list[int]) -> dict:
     whose ESPN id doesn't cross-reference to a GSIS id (rare -- recent
     signing, practice-squad edge case) is simply absent, same fail-open
     contract as fetch_current_injury_impact()."""
-    espn_to_gsis = _espn_id_to_gsis_id(seasons)
+    espn_to_gsis = espn_id_to_gsis_id(seasons)
 
     resp = requests.get(ESPN_INJURIES_URL, timeout=20)
     resp.raise_for_status()
