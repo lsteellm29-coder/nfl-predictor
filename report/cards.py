@@ -14,11 +14,7 @@ import html
 
 import pandas as pd
 
-STAT_LABEL = {
-    "pass_yards": "Passing Yards", "rush_yards": "Rushing Yards",
-    "receptions": "Receptions", "rec_yards": "Receiving Yards", "anytime_td": "Anytime TD",
-}
-GROUP_LABEL = {"WR": "wide receivers", "TE": "tight ends", "RB": "running backs", "RUSH": "the ground game"}
+STAT_LABEL = {"anytime_td": "Anytime TD"}
 
 # Three-tier confidence system (QA spec): 50-59% on the favored side is
 # a toss-up regardless of which way it leans -- yellow, not green/red --
@@ -139,25 +135,20 @@ def _rank_phrase(rank: int) -> str:
 
 
 def reasoning_sentence(reasoning: dict | None, opponent_full: str) -> str | None:
-    """Phrases a model/player_stats.py reasoning dict into the exact style
-    the spec asks for -- "Facing a defense allowing the 3rd-most rushing
-    yards to RBs" -- using a real league rank (data/positional_matchups.py's
-    defense_rank), not a vague qualifier."""
+    """Phrases a model/player_stats.py reasoning dict -- {"rank": N}, the
+    opponent's league rank for red-zone touchdown rate allowed
+    (model/td_model.py's team_red_zone_defense) -- into the exact style
+    the spec asks for: "Facing a defense allowing the 3rd-most..." using
+    a real league rank, not a vague qualifier."""
     if not reasoning:
         return None
     phrase = _rank_phrase(reasoning["rank"])
-    group = reasoning.get("group")
-    if reasoning["kind"] == "yards":
-        what = "passing yards" if group is None else (
-            "rushing yards to running backs" if group == "RUSH" else f"yards to {GROUP_LABEL[group]}")
-    else:
-        what = "rushing TD rate" if group == "RUSH" else f"TD rate to {GROUP_LABEL[group]}"
-    # "whose defense allows" (not "allowing... allowed") -- the original
-    # phrasing doubled up on "allow" once `what` already ended in
-    # "allowed", which read as a grammar error, not just informal.
+    # "whose defense allows" (not "allowing... allowed") -- avoids
+    # doubling up on "allow" once the rest of the sentence already ends
+    # in "allowed," which reads as a grammar error, not just informal.
     # `phrase` already starts with "the" (_rank_phrase), so it isn't
     # repeated here.
-    return f"Facing {opponent_full}, whose defense allows {phrase} {what} in the league this season."
+    return f"Facing {opponent_full}, whose defense allows {phrase} red-zone touchdown rate in the league this season."
 
 
 def _initials(name: str) -> str:
@@ -197,17 +188,10 @@ def espn_headshot_url(espn_id) -> str:
     return f"https://a.espncdn.com/i/headshots/nfl/players/full/{espn_id}.png"
 
 
-def _fmt_line(stat: str, line) -> str:
-    return "Yes" if stat == "anytime_td" else f"{line:g}"
-
-
-def _fmt_projection(stat: str, value: float) -> str:
-    return f"{value:.0f}" if stat in ("pass_yards", "rush_yards", "rec_yards") else f"{value:.1f}"
-
-
 def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
                     opponent_full: str, headshot_url_fn=None, logo_url_fn=None) -> str:
-    """One player-prop card. `row` is a dict from model/player_stats.py's
+    """One player-prop card -- anytime-TD only (Anytime-TD-Only Props
+    Refocus spec). `row` is a dict from model/player_stats.py's
     score_props() (plus `home_full`/`away_full`/`kickoff`/`opponent_full`
     resolved by the caller, since score_props() only carries abbreviations).
     `headshot_url_fn` resolves an espn_id to an image URL (None in the
@@ -216,48 +200,44 @@ def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
     `logo_url_fn` (team abbr -> logo URL/data-URI) is the next fallback
     before initials."""
     has_line = row.get("has_line", True)
-    is_td = row["stat"] == "anytime_td"
-    over_label, under_label = ("Yes", "No") if is_td else ("Higher", "Lower")
 
     if has_line:
         model_prob = row["model_over_prob"]
         is_over = model_prob >= 0.5
         tier, conf = confidence_tier(model_prob if is_over else 1 - model_prob)
-        # "strong" keeps the direction-specific color (green for
-        # Higher/Yes, red for Lower/No); "toss-up" is the same yellow
-        # regardless of which way it barely leans, since below 60% isn't
-        # a real enough call to earn a directional color.
+        # "strong" keeps the direction-specific color (green for Yes, red
+        # for No); "toss-up" is the same yellow regardless of which way
+        # it barely leans, since below 60% isn't a real enough call to
+        # earn a directional color.
         over_class = "side-toss-up" if tier == "toss-up" else ("side-over" if is_over else "")
         under_class = "side-toss-up" if tier == "toss-up" else ("side-under" if not is_over else "")
         over_conf = f'<span class="side-conf">{conf}</span>' if is_over else ""
         under_conf = f'<span class="side-conf">{conf}</span>' if not is_over else ""
-        stat_line = f"{_fmt_line(row['stat'], row['line'])} {STAT_LABEL.get(row['stat'], row['stat'])}"
+        stat_line = f"Yes {STAT_LABEL['anytime_td']}"
         split_html = (
             '<div class="split">'
-            f'<div class="split-side {over_class}"><span class="side-label">{over_label}</span>{over_conf}</div>'
-            f'<div class="split-side {under_class}"><span class="side-label">{under_label}</span>{under_conf}</div>'
+            f'<div class="split-side {over_class}"><span class="side-label">Yes</span>{over_conf}</div>'
+            f'<div class="split-side {under_class}"><span class="side-label">No</span>{under_conf}</div>'
             '</div>'
         )
-        # Anytime-TD props have no real over/under number (`line` is an
-        # internal 0.5 placeholder, not something a sportsbook posts) --
-        # showing it here as "Vegas: Yes" said nothing about what the
-        # market actually thinks, so this shows the market's own implied
-        # probability instead, the same number `edge` is computed from.
-        vegas_val = f"{row['market_over_prob'] * 100:.0f}%" if is_td else _fmt_line(row["stat"], row["line"])
+        # No real over/under number for anytime-TD -- `line` is an
+        # internal 0.5 placeholder, not something a sportsbook posts --
+        # so this shows the market's own implied probability instead, the
+        # same number `edge` is computed from.
         vs_row = (f'<div class="vs-row"><span>{info_icon("Model Projection")}: '
-                  f'<b>{_fmt_projection(row["stat"], row["projection"])}</b></span>'
-                  f'<span>Vegas: <b>{vegas_val}</b></span></div>')
+                  f'<b>{row["model_over_prob"] * 100:.0f}%</b></span>'
+                  f'<span>Vegas: <b>{row["market_over_prob"] * 100:.0f}%</b></span></div>')
     else:
         # QA spec Section 2: the sportsbook hasn't priced this player yet,
         # but they're required lineup coverage -- show the model's own
-        # number plainly instead of omitting them, with no Higher/Lower
-        # toggle (there's no line to be over/under) and no confidence
-        # color, since there's nothing from the market to measure an edge
+        # number plainly instead of omitting them, with no Yes/No toggle
+        # (there's no line to be over/under) and no confidence color,
+        # since there's nothing from the market to measure an edge
         # against.
-        stat_line = f"{STAT_LABEL.get(row['stat'], row['stat'])} -- No line available"
+        stat_line = f"{STAT_LABEL['anytime_td']} -- No line available"
         split_html = '<div class="no-line-badge">No line available -- showing model projection only</div>'
         vs_row = (f'<div class="vs-row"><span>{info_icon("Model Projection")}: '
-                  f'<b>{_fmt_projection(row["stat"], row["projection"])}</b></span></div>')
+                  f'<b>{row["projection"] * 100:.0f}%</b></span></div>')
 
     reasoning = reasoning_sentence(row.get("reasoning"), opponent_full)
     injury_html = ""
@@ -293,16 +273,16 @@ def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
 
 
 def prop_filter_bar_html(rows: list[dict]) -> str:
+    """Team + position filters only -- a "stat" filter dimension no
+    longer makes sense now that anytime-TD is the only prop type every
+    card shares (Anytime-TD-Only Props Refocus spec)."""
     teams = sorted({r["team"] for r in rows})
     positions = sorted({r.get("position") for r in rows if r.get("position")})
-    stats = sorted({r["stat"] for r in rows})
     btns = []
     for t in teams:
         btns.append(f'<button type="button" class="filter-btn" data-filter-type="team" data-filter-value="{t}">{t}</button>')
     for p in positions:
         btns.append(f'<button type="button" class="filter-btn" data-filter-type="pos" data-filter-value="{p}">{p}</button>')
-    for s in stats:
-        btns.append(f'<button type="button" class="filter-btn" data-filter-type="stat" data-filter-value="{s}">{STAT_LABEL.get(s, s)}</button>')
     return f'<div class="filter-bar">{"".join(btns)}</div>'
 
 

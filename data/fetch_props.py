@@ -1,36 +1,30 @@
-# pulls player prop lines (yards, receptions, anytime TD) + alternate game lines for the week
-"""Player prop odds and alternate game lines (alternate spreads/totals,
-team totals) from The Odds API. Unlike the core game lines in
-data/fetch_week.py (one bulk /odds call for the whole week), all of these
-only live on the per-event odds endpoint, so this costs one API call per
-game -- games (with an `event_id` column) come from data/fetch_week.py's
-output, which already threads the event id through from the same bulk
-call used for game lines, at no extra cost. Alternate lines are requested
-in the same per-event call as player props (The Odds API prices both at
-the event-scoped endpoint) so adding them costs nothing beyond what props
-already needed.
+# pulls anytime-TD prop lines + alternate game lines for the week
+"""Player prop odds (anytime-TD only -- Anytime-TD-Only Props Refocus
+spec removed yardage/reception props) and alternate game lines (alternate
+spreads/totals, team totals) from The Odds API. Unlike the core game
+lines in data/fetch_week.py (one bulk /odds call for the whole week), all
+of these only live on the per-event odds endpoint, so this costs one API
+call per game -- games (with an `event_id` column) come from
+data/fetch_week.py's output, which already threads the event id through
+from the same bulk call used for game lines, at no extra cost. Alternate
+lines are requested in the same per-event call as player props (The Odds
+API prices both at the event-scoped endpoint) so adding them costs
+nothing beyond what props already needed.
 """
 
 import pandas as pd
 import requests
 
 from config import ODDS_API_KEY
-from data.odds_aggregation import aggregate_one_sided, aggregate_two_sided, american_to_prob, devig_pair, ladder_by_point
+from data.odds_aggregation import aggregate_one_sided, ladder_by_point
 
 EVENT_ODDS_URL = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event_id}/odds"
 
-# Odds API market key -> our internal stat name. Must match the stat
-# names model/player_stats.py's score_props() and report/cards.py's
-# STAT_LABEL actually check for ("pass_yards"/"rush_yards"/"rec_yards",
-# not the Odds API's own abbreviated "_yds" market-key suffix) -- a
-# mismatch here means score_props() silently falls through to its
-# `else: continue` for every yardage prop, dropping them all regardless
-# of whether real market data came back.
+# Odds API market key -> our internal stat name. anytime-TD only --
+# confirmed live against The Odds API that this market's "Yes" outcomes
+# are rush/receiving TDs (the standard real-world "anytime touchdown
+# scorer" definition), never passing TDs.
 PROP_MARKETS = {
-    "player_pass_yds": "pass_yards",
-    "player_rush_yds": "rush_yards",
-    "player_receptions": "receptions",
-    "player_reception_yds": "rec_yards",
     "player_anytime_td": "anytime_td",
 }
 
@@ -67,55 +61,33 @@ def fetch_event_odds(event_id: str) -> dict:
 
 
 def parse_event_props(raw: dict) -> pd.DataFrame:
-    """One row per (player, stat): the consensus line/probability
-    aggregated across every book quoting it (data/odds_aggregation.py),
-    rather than picking a single book -- real sportsbooks and DFS-style
-    books post different markets this far before kickoff (see
-    fetch_event_odds), so most (player, stat) pairs only have one book
-    quoting them yet anyway; aggregation naturally reduces to that one
-    book's number today and will average across more as books add
-    coverage closer to kickoff, with no code change needed."""
+    """One row per player: the consensus anytime-TD "Yes" probability
+    averaged across every book quoting it (data/odds_aggregation.py's
+    aggregate_one_sided -- there's no "No" leg to de-vig against, same
+    limitation the single-book version always had), rather than picking a
+    single book. Most players only have one book quoting them yet this
+    far before kickoff (see fetch_event_odds); aggregation naturally
+    reduces to that one book's number today and will average across more
+    as books add coverage closer to kickoff, with no code change needed."""
     books = raw.get("bookmakers", [])
     if not books:
         return pd.DataFrame(columns=["player", "stat", "side", "line", "price", "prob", "n_books"])
 
     td_prices: dict[str, list[float]] = {}
-    ou_quotes: dict[tuple[str, str], list[dict]] = {}
     for book in books:
         for market in book.get("markets", []):
-            stat = PROP_MARKETS.get(market["key"])
-            if stat is None:
+            if PROP_MARKETS.get(market["key"]) != "anytime_td":
                 continue
-            outcomes = market["outcomes"]
-            if stat == "anytime_td":
-                for o in outcomes:
-                    if o["name"] != "Yes":
-                        continue
-                    td_prices.setdefault(o["description"], []).append(o["price"])
-                continue
-
-            by_player: dict[str, dict] = {}
-            for o in outcomes:
-                by_player.setdefault(o["description"], {})[o["name"]] = o
-            for player, sides in by_player.items():
-                over, under = sides.get("Over"), sides.get("Under")
-                if not over or not under:
+            for o in market["outcomes"]:
+                if o["name"] != "Yes":
                     continue
-                ou_quotes.setdefault((player, stat), []).append(
-                    {"point": over["point"], "price_a": over["price"], "price_b": under["price"]})
+                td_prices.setdefault(o["description"], []).append(o["price"])
 
     rows = []
     for player, prices in td_prices.items():
         agg = aggregate_one_sided(prices)
         rows.append({"player": player, "stat": "anytime_td", "side": "yes",
                      "line": None, "price": agg["price"], "prob": agg["prob"], "n_books": agg["n_books"]})
-    for (player, stat), quotes in ou_quotes.items():
-        agg = aggregate_two_sided(quotes)
-        rows.append({"player": player, "stat": stat, "side": "over",
-                     "line": agg["point"], "price": agg["price_a"], "prob": agg["prob_a"], "n_books": agg["n_books"]})
-        rows.append({"player": player, "stat": stat, "side": "under",
-                     "line": agg["point"], "price": agg["price_b"], "prob": agg["prob_b"], "n_books": agg["n_books"]})
-
     return pd.DataFrame(rows)
 
 
