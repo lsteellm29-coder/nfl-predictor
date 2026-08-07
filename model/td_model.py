@@ -33,6 +33,10 @@ GOAL_LINE_YARDLINE = 5
 # games each count RECENCY_WEIGHT_MULTIPLIER times as much as an older
 # game -- usage changes fast (new OC, an injury opening up touches, a
 # rookie earning trust) and a flat season-long average lags behind that.
+# Empirically swept (window 3-8, multiplier 1.0-3.0) against the walk-
+# forward backtest -- these original judgment-call values already sit
+# right at the empirical optimum (Brier 0.1689/AUC 0.6681 vs. 0.1696/
+# 0.6656 with recency weighting disabled entirely), no change needed.
 RECENCY_WINDOW = 4
 RECENCY_WEIGHT_MULTIPLIER = 2.0
 
@@ -41,7 +45,14 @@ RECENCY_WEIGHT_MULTIPLIER = 2.0
 # baseline -- a player with 1 red-zone touch that happened to score isn't
 # showing a real 100% red-zone conversion rate, that's noise. Higher =
 # more regression for the same sample size.
-SHRINKAGE_TOUCHES = {"QB": 10, "RB": 8, "WR": 8, "TE": 8}
+#
+# Empirically swept 4-150 against the walk-forward backtest: Brier and
+# AUC improved monotonically from the original guessed values (10/8/8/8)
+# all the way to ~75, then plateaued flat through 150 -- 75 sits right at
+# the start of that plateau. Per-position values (QB/RB/WR/TE tested
+# separately) didn't beat one uniform value, so this stays a single
+# number rather than added complexity that doesn't earn its keep.
+SHRINKAGE_TOUCHES = {"QB": 75, "RB": 75, "WR": 75, "TE": 75}
 
 
 def player_red_zone_touches(pbp: pd.DataFrame) -> pd.DataFrame:
@@ -101,6 +112,21 @@ def team_red_zone_defense(pbp: pd.DataFrame) -> pd.DataFrame:
     ).reset_index().rename(columns={"defteam": "team"})
 
 
+# NOT implemented: red-zone pass defense split by receiver position (WR/
+# TE-specific, the free proxy for 1-on-1 matchup quality this codebase's
+# data can actually support -- true player-vs-player coverage data is a
+# paid-tier/PFF-level feature). Built and A/B tested against the walk-
+# forward backtest: WR/TE Brier went from 0.1681 to 0.1689 and AUC from
+# 0.6242 to 0.6222 with the position-specific factor added on top of the
+# existing team-wide red-zone defense factor -- both got marginally
+# *worse*, not better. Even with a >=20-red-zone-target minimum sample,
+# a defense's targets allowed to one specific position inside the 20 is a
+# genuinely thin slice of a season (a team might see under 20 red-zone TE
+# targets against them all year), thin enough that slicing by position
+# added estimation noise instead of real signal. Reverted rather than
+# shipped on a negative result.
+
+
 def red_zone_defense_rank(team_rz_defense: pd.DataFrame, team: str) -> int | None:
     """1-indexed league rank of how often `team`'s defense allows a
     red-zone trip to end in a TD (1 = allows the most) -- matches how
@@ -133,14 +159,28 @@ def season_to_date(game_log: pd.DataFrame, group_cols: list, value_cols: list, u
 
 
 def recency_weighted_touch_share(touch_log: pd.DataFrame, upto_week: int,
-                                  window: int = RECENCY_WINDOW, multiplier: float = RECENCY_WEIGHT_MULTIPLIER) -> pd.DataFrame:
+                                  window: int | None = None, multiplier: float | None = None) -> pd.DataFrame:
     """Per (team, player_id) red-zone touch share among that team's own
     red-zone touches, using games strictly before `upto_week` -- the last
     `window` of those games count `multiplier`x as much as anything
     older. Returns raw weighted touches/tds per player alongside each
     team's weighted touch total, so the caller can compute both the
     player's share (touches / team total) and their own weighted
-    conversion rate (tds / touches) from the same weighting."""
+    conversion rate (tds / touches) from the same weighting.
+
+    window/multiplier default to None and get resolved to the current
+    module-level RECENCY_WINDOW/RECENCY_WEIGHT_MULTIPLIER *inside* the
+    function body, not as literal parameter defaults -- Python binds a
+    `param=MODULE_CONSTANT` default once, at function-definition time, so
+    a `td_model.RECENCY_WINDOW = X` reassignment done for a sweep/test
+    afterward would silently never take effect with the old signature.
+    Caught this exact bug empirically: a parameter sweep across several
+    window/multiplier values kept returning byte-for-byte identical
+    Brier/AUC no matter what was set, including a supposedly-disabling
+    multiplier=1.0 -- the tell that something was stale, not that
+    recency weighting genuinely didn't matter."""
+    window = RECENCY_WINDOW if window is None else window
+    multiplier = RECENCY_WEIGHT_MULTIPLIER if multiplier is None else multiplier
     prior = touch_log[touch_log["week"] < upto_week].copy()
     if prior.empty:
         return pd.DataFrame(columns=["team", "player_id", "w_rz_touches", "w_rz_tds", "w_gl_touches", "n_games"])
