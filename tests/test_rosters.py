@@ -23,13 +23,18 @@ def _two_season_pull(row_order="current_first"):
     player only in the older season (P2, simulating someone not yet in
     this season's cut-down roster -- the reason a two-season pull
     happens at all), one player only in the current season (P3, a new
-    signee)."""
+    signee). Deliberately uses team codes OUTSIDE TEAM_CODE_ALIASES for
+    this test -- the season-preference bug and the team-code-alias bug
+    are two different fixes in the same function; test_fetch_rosters_
+    canonicalizes_known_team_code_aliases below covers the alias
+    specifically, so this test isn't muddying the season-order
+    assertion with a value fetch_rosters is now expected to rewrite."""
     current = pd.DataFrame([
-        {"season": 2026, "player_id": "P1", "player_name": "Player One", "team": "AZ", "position": "RB", "espn_id": "1"},
+        {"season": 2026, "player_id": "P1", "player_name": "Player One", "team": "KC", "position": "RB", "espn_id": "1"},
         {"season": 2026, "player_id": "P3", "player_name": "Player Three", "team": "SEA", "position": "WR", "espn_id": "3"},
     ])
     prior = pd.DataFrame([
-        {"season": 2025, "player_id": "P1", "player_name": "Player One", "team": "ARI", "position": "FB", "espn_id": "1"},
+        {"season": 2025, "player_id": "P1", "player_name": "Player One", "team": "TB", "position": "FB", "espn_id": "1"},
         {"season": 2025, "player_id": "P2", "player_name": "Player Two", "team": "NE", "position": "TE", "espn_id": "2"},
     ])
     if row_order == "current_first":
@@ -50,7 +55,7 @@ def test_fetch_rosters_prefers_current_season_regardless_of_row_order(monkeypatc
         # resolve to the CURRENT season's team/position, never the
         # prior one -- this must hold no matter which order the two
         # seasons' rows happen to come back in.
-        assert by_id.loc["P1", "team"] == "AZ", f"row_order={row_order}"
+        assert by_id.loc["P1", "team"] == "KC", f"row_order={row_order}"
         assert by_id.loc["P1", "position"] == "RB", f"row_order={row_order}"
 
         # A player only in last season (not yet in this season's pull)
@@ -69,10 +74,32 @@ def test_fetch_rosters_prefers_current_season_regardless_of_row_order(monkeypatc
 def test_fetch_rosters_drops_blank_player_id(monkeypatch):
     blank_id_row = pd.DataFrame([
         {"season": 2026, "player_id": "", "player_name": "No ID Guy", "team": "SEA", "position": "WR", "espn_id": None},
-        {"season": 2026, "player_id": "P1", "player_name": "Player One", "team": "AZ", "position": "RB", "espn_id": "1"},
+        {"season": 2026, "player_id": "P1", "player_name": "Player One", "team": "KC", "position": "RB", "espn_id": "1"},
     ])
     monkeypatch.setattr(rosters_module.nfl, "import_seasonal_rosters", lambda seasons: blank_id_row)
 
     result = rosters_module.fetch_rosters([2026])
     assert "" not in set(result["player_id"])
     assert len(result) == 1
+
+
+def test_fetch_rosters_canonicalizes_known_team_code_aliases(monkeypatch):
+    """The second, deeper bug found chasing the first: nfl_data_py's
+    current-season roster pull uses "AZ" for Arizona while every other
+    dataset this codebase joins against (schedules, snap counts, prior
+    seasons) uses "ARI". Fixing only the season-preference bug actually
+    made this WORSE -- a returning Cardinal correctly resolved to their
+    current row, but that row's team ("AZ") then matched nothing when
+    compared against schedule-sourced "ARI", silently dropping real
+    current-roster players from anything that filters by team. This
+    confirms fetch_rosters() rewrites a known alias before returning,
+    so every caller can compare its `team` column against a schedule's
+    home_team/away_team without a separate translation step."""
+    raw = pd.DataFrame([
+        {"season": 2026, "player_id": "P1", "player_name": "Cardinal Player", "team": "AZ", "position": "WR", "espn_id": "1"},
+    ])
+    monkeypatch.setattr(rosters_module.nfl, "import_seasonal_rosters", lambda seasons: raw)
+
+    result = rosters_module.fetch_rosters([2026])
+    assert result.set_index("player_id").loc["P1", "team"] == "ARI"
+    assert "AZ" not in set(result["team"])

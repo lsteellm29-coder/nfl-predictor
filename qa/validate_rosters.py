@@ -14,6 +14,7 @@ import pandas as pd
 
 from config import CURRENT_SEASON
 from data.fetch_balldontlie import fetch_all_players
+from data.rosters import TEAM_CODE_ALIASES, fetch_rosters
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "cache")
 SNAPSHOT_PATH = os.path.join(CACHE_DIR, "roster_snapshot.parquet")
@@ -25,8 +26,15 @@ MIN_ROSTER_SIZE = 40
 
 
 def fetch_current_roster(season: int = CURRENT_SEASON) -> pd.DataFrame:
-    rosters = nfl.import_seasonal_rosters([season])
-    return rosters[rosters["player_id"] != ""][["player_id", "player_name", "team", "position"]].copy()
+    # data/rosters.py's fetch_rosters() (not a raw nfl.import_seasonal_rosters
+    # call) -- its team-code canonicalization (TEAM_CODE_ALIASES) matters
+    # here specifically: without it, this sweep's own balldontlie/ourlads
+    # cross-checks below would flag ~90 Arizona players as "mismatched"
+    # every single run purely because nfl_data_py's current-season pull
+    # uses "AZ" while balldontlie/ourlads both use "ARI" -- a false
+    # positive on this exact scale, not a real discrepancy to review.
+    rosters = fetch_rosters([season])
+    return rosters[["player_id", "player_name", "team", "position"]].copy()
 
 
 def check_staleness(roster: pd.DataFrame) -> list[str]:
@@ -76,7 +84,16 @@ def year_over_year_changes(season: int = CURRENT_SEASON) -> list[str]:
     source this codebase doesn't have -- surfaced for human review, not
     auto-judged."""
     rosters = nfl.import_seasonal_rosters([season, season - 1])
-    rosters = rosters[rosters["player_id"] != ""]
+    rosters = rosters[rosters["player_id"] != ""].copy()
+    # data/rosters.py's TEAM_CODE_ALIASES -- this function deliberately
+    # keeps BOTH seasons' rows (unlike fetch_rosters(), which collapses
+    # to one row per player_id), so it can't just call fetch_rosters()
+    # here. Without this, a source-side team-code rename between the two
+    # seasons (nfl_data_py's current-season pull using "AZ" for Arizona
+    # while last season's still says "ARI") would show every returning
+    # player on that team as a "team change," burying any real trades
+    # in noise.
+    rosters["team"] = rosters["team"].replace(TEAM_CODE_ALIASES)
     cur = rosters[rosters["season"] == season][["player_id", "player_name", "team"]].drop_duplicates("player_id")
     prev = rosters[rosters["season"] == season - 1][["player_id", "team"]].drop_duplicates("player_id")
     merged = cur.merge(prev, on="player_id", suffixes=("_cur", "_prev"))
