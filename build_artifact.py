@@ -27,6 +27,7 @@ import requests
 
 from config import CURRENT_SEASON
 from data.fetch_news import fetch_news
+from data.team_change_tracker import head_coach_changes, notable_player_moves, team_unit_turnover
 from model.player_stats import score_props
 from model.predict import score_week
 from report.about import HOW_IT_WORKS_HTML, HOW_IT_WORKS_STYLE
@@ -420,8 +421,23 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     team_stats_df = pd.read_parquet(TEAM_STATS_PATH) if os.path.exists(TEAM_STATS_PATH) else pd.DataFrame()
     schedules_df = pd.read_parquet(SCHEDULES_PATH) if os.path.exists(SCHEDULES_PATH) else pd.DataFrame()
     td_backtest_df = pd.read_parquet(BACKTEST_PATH) if os.path.exists(BACKTEST_PATH) else pd.DataFrame()
+    # Combined Build Plan Part 3 step 3: same data model/predict.py's
+    # score_week() already computed for its own narrative/confidence-
+    # caveat use, fetched again here rather than threaded through
+    # predictions -- team_hub.py's whole existing contract is "no live
+    # network calls, work off provided dataframes," and score_week()
+    # doesn't expose this in its return value today (it's folded into
+    # per-game fields, not the raw team-keyed dicts this display needs).
+    try:
+        coach_changes = head_coach_changes(CURRENT_SEASON)
+        unit_turnover = team_unit_turnover(CURRENT_SEASON)
+        notable_moves = notable_player_moves(CURRENT_SEASON)
+    except Exception as e:
+        print(f"Warning: couldn't compute team-change tracking for team hubs ({e}); skipping it this run.")
+        coach_changes, unit_turnover, notable_moves = {}, {}, {}
     team_hubs_section = team_hubs_html(
-        predictions, props, team_stats_df, schedules_df, td_backtest_df, row_data_fn=row_dict)
+        predictions, props, team_stats_df, schedules_df, td_backtest_df, row_data_fn=row_dict,
+        coach_changes=coach_changes, unit_turnover=unit_turnover, notable_moves=notable_moves)
     # headshot_url_fn=None: same reason row_dict() above passes None --
     # external images can't load in a self-contained Artifact.
     compare_section = compare_html(props, td_backtest_df, headshot_url_fn=None, logo_url_fn=embed)

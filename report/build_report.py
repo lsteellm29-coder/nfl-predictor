@@ -17,6 +17,7 @@ import pandas as pd
 
 from config import CURRENT_SEASON
 from data.situational import is_short_week
+from data.team_change_tracker import head_coach_changes, notable_player_moves, team_unit_turnover
 from report.about import HOW_IT_WORKS_HTML, HOW_IT_WORKS_STYLE
 from report.alt_lines import ALT_LINES_STYLE, alt_lines_html
 from report.archive import ARCHIVE_STYLE, archive_html
@@ -608,9 +609,20 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
     team_stats_df = pd.read_parquet(TEAM_STATS_PATH) if os.path.exists(TEAM_STATS_PATH) else pd.DataFrame()
     schedules_df = pd.read_parquet(SCHEDULES_PATH) if os.path.exists(SCHEDULES_PATH) else pd.DataFrame()
     td_backtest_df = pd.read_parquet(BACKTEST_PATH) if os.path.exists(BACKTEST_PATH) else pd.DataFrame()
+    # Combined Build Plan Part 3 step 3: see build_artifact.py's identical
+    # block for why this is fetched again here rather than threaded
+    # through predictions.
+    try:
+        coach_changes = head_coach_changes(season)
+        unit_turnover = team_unit_turnover(season)
+        notable_moves = notable_player_moves(season)
+    except Exception as e:
+        print(f"Warning: couldn't compute team-change tracking for team hubs ({e}); skipping it this run.")
+        coach_changes, unit_turnover, notable_moves = {}, {}, {}
     team_hubs_section = team_hubs_html(
         predictions, props, team_stats_df, schedules_df, td_backtest_df,
         row_data_fn=lambda g: _row_data(g, props),
+        coach_changes=coach_changes, unit_turnover=unit_turnover, notable_moves=notable_moves,
     )
     compare_section = compare_html(props, td_backtest_df, headshot_url_fn=espn_headshot_url, logo_url_fn=get_logo_url)
 

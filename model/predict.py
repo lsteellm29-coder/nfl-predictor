@@ -28,6 +28,9 @@ from data.rosters import fetch_rosters
 from data.situational import (
     away_travel_penalty, blowout_loss_flags, is_short_week, lookahead_flags,
 )
+from data.team_change_tracker import (
+    head_coach_changes, team_change_confidence_flag, team_unit_turnover,
+)
 from data.team_history import coach_h2h, team_last_n_meetings
 from data.team_stats import build_rolling_team_stats, build_team_game_stats
 from model.calibration import apply_calibrator
@@ -570,6 +573,20 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     historical_schedule = pd.read_parquet(SCHEDULES_PATH)
     combined_schedule = pd.concat([historical_schedule, nfl.import_schedules([season])], ignore_index=True)
 
+    # Combined Build Plan Part 3: coaching changes + per-unit roster
+    # continuity, same narrative-lookup-layer treatment (built once per
+    # week, never touches FEATURE_COLS) as the block above it.
+    try:
+        coach_changes = head_coach_changes(season)
+        unit_turnover_by_team = team_unit_turnover(season)
+        team_changes = {
+            team: {"coach_change": coach_changes.get(team), "unit_turnover": unit_turnover_by_team.get(team, {})}
+            for team in set(coach_changes) | set(unit_turnover_by_team)
+        }
+    except Exception as e:
+        print(f"Warning: couldn't compute team-change tracking ({e}); skipping it this run.")
+        team_changes = {}
+
     rows = []
     for _, game in games.iterrows():
         feat = _build_features(game, stats, injury_impact, elo_ratings, blowout_flags, lookahead_flags_now)
@@ -579,13 +596,34 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             game["home_team"], season - 1, roster_turnover, fallback_status)
         row["away_fallback_caveat"] = fallback_confidence_caveat(
             game["away_team"], season - 1, roster_turnover, fallback_status)
+
+        # Combined Build Plan Part 3 step 4: the SAME confidence-caveat
+        # system Part 2 established, triggered by a different signal --
+        # a new head coach plus meaningfully high position-unit turnover,
+        # active through a longer games-played window than Part 2's own
+        # (COACH_CHANGE_GAMES_WINDOW vs. FALLBACK_GAMES_THRESHOLD -- a
+        # new scheme takes longer to prove itself than a thin stat sample
+        # alone does).
+        home_change = team_changes.get(game["home_team"], {})
+        away_change = team_changes.get(game["away_team"], {})
+        home_games_played = fallback_status.get(game["home_team"], {}).get("games_played", 0)
+        away_games_played = fallback_status.get(game["away_team"], {}).get("games_played", 0)
+        row["home_team_change_flag"] = team_change_confidence_flag(
+            home_games_played, home_change.get("coach_change"), home_change.get("unit_turnover", {}))
+        row["away_team_change_flag"] = team_change_confidence_flag(
+            away_games_played, away_change.get("coach_change"), away_change.get("unit_turnover", {}))
+
         # Combined Build Plan Part 2 step 3: nudge the DISPLAYED confidence
         # tier, never the model's own probability -- report/cards.py's
         # confidence_tier() takes this as an extra "uncertain" flag that
         # forces the toss-up color regardless of how confident the raw
         # number looks, same "don't silently adjust, don't silently trust
-        # either" split the spec asks for.
-        row["confidence_uncertain"] = bool(row["home_fallback_caveat"] or row["away_fallback_caveat"])
+        # either" split the spec asks for. Part 3's team-change flag folds
+        # into the exact same displayed-tier nudge, not a second separate
+        # mechanism.
+        row["confidence_uncertain"] = bool(
+            row["home_fallback_caveat"] or row["away_fallback_caveat"]
+            or row["home_team_change_flag"] or row["away_team_change_flag"])
         row["home_td_scorer"] = get_td_scorer_prediction(
             game["home_team"], game["away_team"], td_inputs, implied_totals, league_avg_implied_total)
         row["away_td_scorer"] = get_td_scorer_prediction(
@@ -643,7 +681,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         team_h2h = team_last_n_meetings(home, away, combined_schedule)
         coach_h2h_record = coach_h2h(game.get("home_coach"), game.get("away_coach"), combined_schedule)
         row["lead_narrative"] = select_lead_narrative(
-            winner, loser, mismatches, qb_streaks, rb_streaks, team_h2h, coach_h2h_record)
+            winner, loser, mismatches, qb_streaks, rb_streaks, team_h2h, coach_h2h_record, team_changes)
         rows.append(row)
 
     return pd.DataFrame(rows)

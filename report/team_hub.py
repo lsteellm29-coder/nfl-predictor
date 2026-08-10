@@ -26,6 +26,7 @@ import html
 
 import pandas as pd
 
+from data.team_change_tracker import team_change_callouts
 from report.charts import player_td_trend_chart, team_epa_trend_chart
 
 TEAM_HUB_SECTION = """<div class="section-head" id="team-hubs"><span class="accent">&#9679;</span> Team Hubs</div>
@@ -40,6 +41,7 @@ HUB_BLOCK = """<details class="card-section team-hub">
   </summary>
   <div class="props-panel">
     <div class="team-hub-next">Next: {opponent_full} &middot; {kickoff} &middot; {home_away}{spread_bit}</div>
+    {change_callouts_html}
     {trend_chart}
     {players_html}
   </div>
@@ -64,6 +66,9 @@ TEAM_HUB_STYLE = """
 .team-hub-player-name { font-size: 13px; font-weight: 600; }
 .team-hub-player-pos { color: var(--muted); font-weight: 400; font-size: 11.5px; }
 .team-hub-player-empty { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.team-hub-callouts { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.team-hub-callout { font-size: 12px; color: var(--warning); background: var(--warning-soft);
+  border: 1px solid var(--warning); border-radius: 6px; padding: 6px 9px; line-height: 1.4; }
 """
 
 
@@ -143,16 +148,28 @@ def _hub_players(props_df: pd.DataFrame, team: str) -> list[tuple]:
 
 
 def team_hub_html(team: str, row: dict, team_stats_df: pd.DataFrame, schedules_df: pd.DataFrame,
-                   td_backtest_df: pd.DataFrame, props_df: pd.DataFrame) -> str:
+                   td_backtest_df: pd.DataFrame, props_df: pd.DataFrame,
+                   coach_changes: dict | None = None, unit_turnover: dict | None = None,
+                   notable_moves: dict | None = None) -> str:
     """row: the same per-game dict report/build_report.py's/build_artifact.py's
     _row_data() already built for this team's game this week -- reused
     rather than recomputed, so kickoff/full-name/logo formatting stays
-    identical to the rest of the page."""
+    identical to the rest of the page.
+
+    coach_changes/unit_turnover/notable_moves (Combined Build Plan
+    Part 3 step 3's "Display" requirement): data/team_change_tracker.py's
+    three dicts, keyed by team -- all default to None/{} so a caller
+    that hasn't fetched this data yet still gets a working hub, just
+    without the callout block."""
     is_home = team == row["home_team"]
     opponent_full = row["home_full"] if not is_home else row["away_full"]
     team_full = row["home_full"] if is_home else row["away_full"]
     logo = row["home_logo"] if is_home else row["away_logo"]
     spread_bit = f" &middot; spread {row['spread_line']}" if row.get("spread_line") not in (None, "--") else ""
+
+    callouts = team_change_callouts(team, coach_changes or {}, unit_turnover or {}, notable_moves or {})
+    callout_items = "".join(f'<div class="team-hub-callout">{_esc(c)}</div>' for c in callouts)
+    change_callouts_html = f'<div class="team-hub-callouts">{callout_items}</div>' if callouts else ""
 
     trend_weekly = _team_trend_weekly(team_stats_df, team)
     trend_chart = team_epa_trend_chart(trend_weekly)
@@ -171,17 +188,21 @@ def team_hub_html(team: str, row: dict, team_stats_df: pd.DataFrame, schedules_d
         record=_esc(_team_record(schedules_df, team)),
         opponent_full=_esc(opponent_full), kickoff=_esc(row["kickoff"]),
         home_away="Home" if is_home else "Away", spread_bit=spread_bit,
+        change_callouts_html=change_callouts_html,
         trend_chart=trend_chart, players_html=players_html,
     )
 
 
 def team_hubs_html(predictions: pd.DataFrame, props: pd.DataFrame, team_stats_df: pd.DataFrame,
-                    schedules_df: pd.DataFrame, td_backtest_df: pd.DataFrame, row_data_fn) -> str:
+                    schedules_df: pd.DataFrame, td_backtest_df: pd.DataFrame, row_data_fn,
+                    coach_changes: dict | None = None, unit_turnover: dict | None = None,
+                    notable_moves: dict | None = None) -> str:
     """row_data_fn: a single-arg callable (game row -> the same dict
     passed to GAME_BLOCK.format(**...)) supplied by the caller, so this
     module never has to import report.build_report and risk a circular
     import (build_report/build_artifact both import team_hub, not the
-    other way around)."""
+    other way around). coach_changes/unit_turnover/notable_moves: see
+    team_hub_html()'s own docstring."""
     if predictions.empty:
         return ""
     teams = sorted(set(predictions["home_team"]) | set(predictions["away_team"]))
@@ -191,7 +212,9 @@ def team_hubs_html(predictions: pd.DataFrame, props: pd.DataFrame, team_stats_df
         if game_rows.empty:
             continue
         row = row_data_fn(game_rows.iloc[0])
-        blocks.append(team_hub_html(team, row, team_stats_df, schedules_df, td_backtest_df, props))
+        blocks.append(team_hub_html(
+            team, row, team_stats_df, schedules_df, td_backtest_df, props,
+            coach_changes, unit_turnover, notable_moves))
     if not blocks:
         return ""
     return TEAM_HUB_SECTION.format(body="\n".join(blocks))

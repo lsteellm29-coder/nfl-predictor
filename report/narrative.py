@@ -11,6 +11,7 @@ module existed.
 
 from data.player_trends import QB_TREND_THRESHOLD, RB_TREND_THRESHOLD
 from data.positional_matchups import POSITION_GROUPS
+from data.team_change_tracker import UNIT_TURNOVER_NOTABLE
 
 # A positional mismatch score below this (combined offense-produced +
 # defense-allowed EPA, see data/positional_matchups.py) is real but not
@@ -35,6 +36,17 @@ GROUP_LABEL = {
     "WR": "wide receivers", "TE": "tight ends",
     "RB": "running backs out of the backfield", "RUSH": "ground game",
 }
+
+# Combined Build Plan Part 3: a normalized severity score for the LOSER's
+# team-change signal (new coach, position-unit turnover) -- same "the
+# opponent's weakness supports the winner" framing _positional_candidates
+# already uses, since a team's OWN turnover is a reason to trust that
+# team's number LESS, not a reason they win; the loser's instability is
+# what actually supports picking against them. 1.0 point for a coach
+# change, plus turnover_pct / TEAM_CHANGE_TURNOVER_NOTABLE for however
+# bad the worst-affected unit is -- so a new coach alone already clears
+# the bar, and severe unit turnover (with or without a new coach) can too.
+TEAM_CHANGE_TURNOVER_NOTABLE = UNIT_TURNOVER_NOTABLE
 
 
 def _positional_candidates(winner: str, mismatches: list[dict]) -> list[tuple[float, dict]]:
@@ -84,18 +96,40 @@ def _h2h_candidate(winner: str, h2h: dict | None, a_key: str, b_key: str,
     return (priority_weight * margin_rate / clean_rate, h2h)
 
 
+def _team_change_candidate(winner: str, loser: str, team_changes: dict) -> tuple[float, dict] | None:
+    """Combined Build Plan Part 3: supports `winner` when the LOSER has a
+    real, citable team-change signal -- a new head coach and/or
+    meaningfully high turnover in some position unit. `team_changes` is
+    {team: {"coach_change": {...} | None, "unit_turnover": {...}}},
+    built once per week by model/predict.py alongside its other
+    narrative-lookup data."""
+    change = team_changes.get(loser)
+    if not change:
+        return None
+    score = 0.0
+    if change.get("coach_change"):
+        score += 1.0
+    max_turnover = max((u["turnover_pct"] for u in change.get("unit_turnover", {}).values()), default=0.0)
+    if max_turnover >= TEAM_CHANGE_TURNOVER_NOTABLE:
+        score += max_turnover / TEAM_CHANGE_TURNOVER_NOTABLE
+    if score == 0.0:
+        return None
+    return (score, {"type": "team_change", "team": loser, **change})
+
+
 def select_lead_narrative(
     winner: str, loser: str,
     mismatches: list[dict], qb_streaks: list[dict | None], rb_streaks: list[dict | None],
-    team_h2h: dict | None, coach_h2h: dict | None,
+    team_h2h: dict | None, coach_h2h: dict | None, team_changes: dict | None = None,
 ) -> dict | None:
     """The single most extreme candidate that supports `winner`, across all
-    four narrative types, or None if nothing clears its type's bar. Each
+    five narrative types, or None if nothing clears its type's bar. Each
     type's severity is normalized against its own "just barely notable"
     threshold, so a score of ~1.0 means "right at the bar" and higher
     means progressively more extreme -- comparable enough across
     differently-scaled metrics (EPA, games, meeting records) to rank them
-    against each other."""
+    against each other. team_changes defaults to None (not {}) so every
+    existing caller that predates Part 3 keeps working unchanged."""
     candidates = (
         _positional_candidates(winner, mismatches)
         + _streak_candidates(winner, loser, qb_streaks, QB_TREND_THRESHOLD)
@@ -107,6 +141,9 @@ def select_lead_narrative(
     coach = _h2h_candidate(winner, coach_h2h, "coach_a", "coach_b", COACH_H2H_CLEAN_MARGIN_RATE, COACH_H2H_PRIORITY_WEIGHT)
     if coach:
         candidates.append(coach)
+    change = _team_change_candidate(winner, loser, team_changes or {})
+    if change:
+        candidates.append(change)
 
     if not candidates:
         return None
@@ -176,6 +213,22 @@ def _phrase_coach_h2h(h: dict, winner_coach: str) -> str:
     return f"There's a coaching angle here too: {winner_coach} is {winner_wins}-{other_wins} all-time against {other}."
 
 
+def _phrase_team_change(c: dict, full_name) -> str:
+    team = full_name(c["team"])
+    parts = []
+    coach_change = c.get("coach_change")
+    if coach_change:
+        parts.append(f"a new head coach in {coach_change['current_coach']}")
+    unit_turnover = c.get("unit_turnover") or {}
+    worst_unit = max(unit_turnover.items(), key=lambda kv: kv[1]["turnover_pct"], default=None)
+    if worst_unit and worst_unit[1]["turnover_pct"] >= TEAM_CHANGE_TURNOVER_NOTABLE:
+        unit, data = worst_unit
+        parts.append(f"real turnover at {unit} ({data['departed']} of {data['total']} regular starters new)")
+    joined = " and ".join(parts)
+    return (f"There's more going on here than the stats alone capture: {team} is dealing with {joined} "
+            f"this season, which adds some real uncertainty to how much last season's numbers still apply.")
+
+
 def phrase_lead_narrative(candidate: dict, winner: str, winner_coach: str, full_name) -> str:
     phrasers = {
         "positional": lambda c: _phrase_positional(c, full_name),
@@ -183,5 +236,6 @@ def phrase_lead_narrative(candidate: dict, winner: str, winner_coach: str, full_
         "rb_streak": lambda c: _phrase_rb_streak(c, full_name),
         "team_h2h": lambda c: _phrase_team_h2h(c, winner, full_name),
         "coach_h2h": lambda c: _phrase_coach_h2h(c, winner_coach),
+        "team_change": lambda c: _phrase_team_change(c, full_name),
     }
     return phrasers[candidate["type"]](candidate)
