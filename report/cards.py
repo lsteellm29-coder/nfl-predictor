@@ -148,6 +148,10 @@ CARDS_STYLE = """
   padding-bottom: 6px; border-bottom: 1px solid var(--border, #E1E4EA); }
 .vs-row b { color: var(--ink, #171A21); }
 .card-injury { margin-top: 6px; font-size: 11.5px; color: var(--negative, #B23A3A); }
+.returned-badge { display: inline-block; margin-left: 6px; padding: 2px 7px; border-radius: 999px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+  color: var(--positive, #2A7A4F); background: var(--positive-soft, #E7F5EC); vertical-align: middle; }
+.card-returned { margin-top: 6px; font-size: 11.5px; color: var(--positive, #2A7A4F); }
 
 .term-wrap { position: relative; }
 .info-icon { background: none; border: none; color: var(--muted, #666E7D); cursor: pointer; font-size: 12px;
@@ -283,10 +287,24 @@ def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
                         f'{html.escape(str(row["injury_status"]))} -- the projection above already '
                         f'accounts for reduced usage, so it\'s not just a raw season average.</div>')
 
+    # Combined Build Plan Part 4 -- the positive counterpart to
+    # injury_html above: a player who WAS on the injury report recently
+    # (data/fetch_injuries.py's detect_returned_players(), a real week-
+    # over-week signal, not a guess) and is absent from it now. Usage
+    # often jumps fast once fully cleared -- genuinely useful, not just
+    # the absence of bad news, so it earns its own visible badge, not
+    # just silence where the red injury tag used to be.
+    returned_html = ""
+    if row.get("returned_from_injury"):
+        returned_html = (f'<div class="card-returned">{html.escape(row["player"])} was recently on the '
+                          f'injury report and is off it now -- usage can jump in the first game or two '
+                          f'back, which the projection above doesn\'t specifically account for.</div>')
+
     detail_lines = []
     if reasoning:
         detail_lines.append(f"<p>{html.escape(reasoning)}</p>")
     detail_lines.append(injury_html)
+    detail_lines.append(returned_html)
 
     # abs(edge) for sort-by-edge (Master Honing Plan round 2, item #3) --
     # biggest model-vs-market DISAGREEMENT first, regardless of direction;
@@ -303,13 +321,16 @@ def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
     edge = row.get("edge")
     edge_sort = -1 if pd.isna(edge) else abs(edge)
     player_search_key = html.escape(row["player"].lower())
+    returned_badge = (
+        '<span class="returned-badge" title="Recently returned from the injury report">Cleared to play</span>'
+        if row.get("returned_from_injury") else "")
 
     return f"""<div class="pcard" data-team="{row['team']}" data-pos="{row.get('position') or ''}" data-stat="{row['stat']}" data-edge="{edge_sort}" data-player="{player_search_key}">
   <button type="button" class="card-share-btn" data-share-card aria-label="Download {html.escape(row['player'])}'s pick as an image">&#8681;</button>
   <div class="pcard-head">
     {headshot_html(row['player'], row['team'], row.get('espn_id'), headshot_url_fn, logo_url_fn)}
     <div>
-      <div class="pcard-name">{html.escape(row['player'])}</div>
+      <div class="pcard-name">{html.escape(row['player'])}{returned_badge}</div>
       <div class="pcard-meta">{row['team']} &middot; {row.get('position') or '--'}</div>
     </div>
   </div>

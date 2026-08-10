@@ -27,7 +27,9 @@ import nfl_data_py as nfl
 import pandas as pd
 
 from config import CURRENT_SEASON
-from data.fetch_injuries import USAGE_MULTIPLIER, fetch_current_player_injury_status
+from data.fetch_injuries import (
+    USAGE_MULTIPLIER, detect_returned_players, fetch_current_player_injury_status, save_injury_snapshot,
+)
 from data.fetch_props import fetch_props_for_week
 from data.fetch_week import fetch_week
 from data.positional_matchups import position_map
@@ -420,6 +422,18 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     except Exception:
         injury_status = {}
 
+    # Combined Build Plan Part 4 ("Cleared to Play" indicator): persists
+    # this week's snapshot for FUTURE weeks to detect a return against,
+    # and checks this week's players against the last couple of ALREADY-
+    # saved snapshots. Both best-effort -- a snapshot write/read hiccup
+    # shouldn't be able to block scoring the week itself, same fail-open
+    # contract as the injury_status fetch just above.
+    try:
+        save_injury_snapshot(injury_status, season, week)
+        returned_players = detect_returned_players(injury_status, season, week)
+    except Exception:
+        returned_players = set()
+
     blocked_names = _load_blocked_player_names()
 
     rows = []
@@ -471,6 +485,7 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             "edge": model_prob - m["market_over_prob"],
             "reasoning": reasoning,
             "injury_status": injury["status"] if injury else None,
+            "returned_from_injury": player_id in returned_players,
             "has_line": True,
         })
 
@@ -522,6 +537,7 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
                         "line": None, "market_price": None, "market_over_prob": None,
                         "projection": model_prob, "model_over_prob": None, "edge": None,
                         "reasoning": reasoning, "injury_status": injury["status"] if injury else None,
+                        "returned_from_injury": player_id in returned_players,
                         "has_line": False,
                     })
 

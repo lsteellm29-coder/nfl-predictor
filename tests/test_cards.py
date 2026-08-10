@@ -104,3 +104,19 @@ def test_game_pick_card_no_caveat_html_when_nothing_flagged():
     html_out = game_pick_card_html(game, "Home Team", "Away Team")
     assert "fallback-caveat" not in html_out
     assert "side-over" in html_out  # normal strong-tier color, not toss-up
+
+
+# Combined Build Plan Part 4: "Cleared to Play" badge on prop cards.
+def test_prop_card_shows_returned_badge_when_flagged():
+    row = {**BASE_ROW, "edge": 0.1, "returned_from_injury": True}
+    html_out = prop_card_html(row, "Home Team", "Away Team", "kickoff", "Opponent")
+    assert "returned-badge" in html_out
+    assert "card-returned" in html_out
+    assert "Cleared to play" in html_out
+
+
+def test_prop_card_no_returned_badge_by_default():
+    row = {**BASE_ROW, "edge": 0.1}
+    html_out = prop_card_html(row, "Home Team", "Away Team", "kickoff", "Opponent")
+    assert "returned-badge" not in html_out
+    assert "card-returned" not in html_out

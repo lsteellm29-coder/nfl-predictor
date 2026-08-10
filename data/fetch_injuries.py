@@ -16,11 +16,15 @@ contributes status_weight * position_weight, summed per team. Higher score
 = more/worse injuries.
 """
 
+import os
 import re
 
 import nfl_data_py as nfl
 import pandas as pd
 import requests
+
+CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "cache")
+INJURY_HISTORY_PATH = os.path.join(CACHE_DIR, "injury_history.parquet")
 
 # Historical reports use the official designation. "Probable" was retired
 # from the NFL's official report after 2016 and essentially never appears,
@@ -156,6 +160,57 @@ def fetch_current_player_injury_status(seasons: list[int]) -> dict:
                 "usage_multiplier": USAGE_MULTIPLIER[status],
             }
     return out
+
+
+# Combined Build Plan Part 4 ("Cleared to Play" / Returned-from-Injury
+# Indicator): fetch_current_player_injury_status() above is a live
+# snapshot only -- ESPN's feed has no historical query, so "was this
+# player on the report last week" isn't answerable from a single call.
+# RETURN_WINDOW_WEEKS worth of weekly snapshots, persisted here, is what
+# makes that question answerable at all.
+RETURN_WINDOW_WEEKS = 2
+
+
+def save_injury_snapshot(status: dict, season: int, week: int) -> None:
+    """Appends this week's injury statuses to the persistent history log
+    -- one row per player currently on the report. Replaces any existing
+    rows for this exact (season, week) first, so re-running the same
+    week's scoring twice (a real thing that happens -- a mid-week rerun
+    after a late scratch) doesn't duplicate or leave a stale earlier-in-
+    the-week snapshot sitting alongside a newer one."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    new_rows = pd.DataFrame([
+        {"season": season, "week": week, "player_id": player_id, "status": info["status"]}
+        for player_id, info in status.items()
+    ])
+    if os.path.exists(INJURY_HISTORY_PATH):
+        history = pd.read_parquet(INJURY_HISTORY_PATH)
+        history = history[~((history["season"] == season) & (history["week"] == week))]
+        history = pd.concat([history, new_rows], ignore_index=True)
+    else:
+        history = new_rows
+    history.to_parquet(INJURY_HISTORY_PATH)
+
+
+def detect_returned_players(current_status: dict, season: int, week: int) -> set[str]:
+    """GSIS player_ids who appeared on the injury report in at least one
+    of the RETURN_WINDOW_WEEKS weeks immediately before `week` but are
+    absent from `current_status` right now -- the actual "cleared to
+    play" signal (spec: "are they now absent from it... "). Missing
+    history (first time this has ever run, or the cache file doesn't
+    exist yet) returns an empty set rather than erroring -- same fail-
+    open contract as the rest of this module; there's simply nothing to
+    compare against yet."""
+    if not os.path.exists(INJURY_HISTORY_PATH):
+        return set()
+    history = pd.read_parquet(INJURY_HISTORY_PATH)
+    recent = history[
+        (history["season"] == season)
+        & (history["week"] < week)
+        & (history["week"] >= week - RETURN_WINDOW_WEEKS)
+    ]
+    recently_hurt = set(recent["player_id"])
+    return recently_hurt - set(current_status.keys())
 
 
 def fetch_current_injury_impact() -> dict:
