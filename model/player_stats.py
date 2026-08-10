@@ -462,8 +462,18 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
                         continue
                     model_prob, reasoning = fallback_result
                     injury = injury_status.get(player_id)
+                    # player_id was missing from this dict entirely (unlike
+                    # the market-backed row above) -- silently left every
+                    # no-line/fallback prop (the majority: 205 of 264 rows
+                    # for a real week-1 slate) unidentifiable by anything
+                    # that needs to cross-reference a specific player, e.g.
+                    # report/team_hub.py and report/compare.py's TD-history
+                    # lookups. Found live: those pages rendered with almost
+                    # no players. Harmless for grading (run_week.py's
+                    # log_props_week only ever logs has_line=True rows).
                     rows.append({
-                        "player": id_to_name.get(player_id, player_id), "stat": "anytime_td", "team": team,
+                        "player": id_to_name.get(player_id, player_id), "player_id": player_id,
+                        "stat": "anytime_td", "team": team,
                         "opponent": opponent, "position": position, "espn_id": id_to_espn_id.get(player_id),
                         "line": None, "market_price": None, "market_over_prob": None,
                         "projection": model_prob, "model_over_prob": None, "edge": None,

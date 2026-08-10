@@ -27,9 +27,13 @@ from report.logos import get_logo_url
 from report.narrative import phrase_lead_narrative
 from report.news_section import NEWS_STYLE, news_section_html
 from report.props import props_section_html
+from report.compare import COMPARE_SCRIPT, COMPARE_STYLE, compare_html
 from report.recap import RECAP_STYLE
+from report.team_hub import TEAM_HUB_STYLE, team_hubs_html
 from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE, game_anchor, td_chip_parts
 from report.track_record import TRACK_RECORD_STYLE, track_record_html
+from data.team_stats import SCHEDULES_PATH, TEAM_STATS_PATH
+from model.td_ensemble import BACKTEST_PATH
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "model.joblib")
@@ -161,7 +165,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 {recap_style}
 {how_it_works_style}
 {leaderboard_style}
-{archive_style}</style>
+{archive_style}
+{team_hub_style}
+{compare_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -186,6 +192,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   {days}
 
+  {team_hubs_section}
+
+  {compare_section}
+
   {track_record_section}
 
   {archive_section}
@@ -197,7 +207,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </footer>
 </div>
 <script>{cards_script}
-{charts_script}</script>
+{charts_script}
+{compare_script}</script>
 </body>
 </html>
 """
@@ -577,12 +588,27 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
     model_type_article = "An" if metrics["model_type"] in ("ensemble", "xgboost") else "A"
     log_df = pd.read_csv(LOG_PATH) if os.path.exists(LOG_PATH) else pd.DataFrame()
     props_log_df = pd.read_csv(PROPS_LOG_PATH) if os.path.exists(PROPS_LOG_PATH) else pd.DataFrame()
+
+    # Round 2 UX, item #58: team hub sections read straight from the same
+    # cached parquet files data/team_stats.py and model/td_ensemble.py
+    # already maintain -- no live fetch, no new data collection.
+    team_stats_df = pd.read_parquet(TEAM_STATS_PATH) if os.path.exists(TEAM_STATS_PATH) else pd.DataFrame()
+    schedules_df = pd.read_parquet(SCHEDULES_PATH) if os.path.exists(SCHEDULES_PATH) else pd.DataFrame()
+    td_backtest_df = pd.read_parquet(BACKTEST_PATH) if os.path.exists(BACKTEST_PATH) else pd.DataFrame()
+    team_hubs_section = team_hubs_html(
+        predictions, props, team_stats_df, schedules_df, td_backtest_df,
+        row_data_fn=lambda g: _row_data(g, props),
+    )
+    compare_section = compare_html(props, td_backtest_df, headshot_url_fn=espn_headshot_url, logo_url_fn=get_logo_url)
+
     return HTML_TEMPLATE.format(
         week=week, season=season, n_games=len(predictions), days="\n".join(days_html),
         theme_style=THEME_STYLE, cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
         track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_html(log_df, props_log_df),
         archive_style=ARCHIVE_STYLE, archive_section=archive_html(log_df),
+        team_hub_style=TEAM_HUB_STYLE, team_hubs_section=team_hubs_section,
+        compare_style=COMPARE_STYLE, compare_section=compare_section, compare_script=COMPARE_SCRIPT,
         alt_lines_style=ALT_LINES_STYLE, charts_style=CHARTS_STYLE, charts_script=CHARTS_SCRIPT,
         recap_style=RECAP_STYLE, how_it_works_style=HOW_IT_WORKS_STYLE, how_it_works_section=HOW_IT_WORKS_HTML,
         leaderboard_style=LEADERBOARD_STYLE, leaderboard_section=leaderboard_html(predictions, props),

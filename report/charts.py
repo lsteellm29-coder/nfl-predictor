@@ -54,6 +54,8 @@ CHARTS_STYLE = """
 .chart-svg .bar-fill.is-away { fill: var(--series-2); }
 .chart-svg .bar-fill:hover, .chart-svg .hit-area:hover + .bar-fill { filter: brightness(1.15); }
 .chart-svg .bar-fill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chart-svg .line-path.is-series-2 { stroke: var(--series-2); }
+.chart-svg .line-point.is-series-2 { fill: var(--series-2); }
 .chart-tooltip {
   position: absolute; pointer-events: none; z-index: 5;
   background: var(--ink); color: var(--paper); font-size: 12px; line-height: 1.4;
@@ -72,7 +74,18 @@ CHARTS_SCRIPT = """
   // Generic hover layer for every .chart-wrap on the page -- reads each
   // hoverable mark's data-tooltip (plain text, set via textContent, never
   // innerHTML) and floats a single shared tooltip near the pointer.
-  document.querySelectorAll('.chart-wrap').forEach(function (wrap) {
+  //
+  // Wiring is LAZY for any .chart-wrap sitting inside a closed <details>
+  // (report/team_hub.py's per-team sections, up to 32 of them, each with
+  // several player mini-charts): found by scrolling a real week-1 build
+  // (every team plays, so all 32 hubs render) -- wiring every mark's
+  // listeners for charts nobody has opened yet stalled the page's own
+  // renderer during a live browser test, not just a slow paint. Charts
+  // outside any <details> (hero comparison, track record) still wire
+  // immediately, same as before.
+  function wireChart(wrap) {
+    if (wrap.dataset.wired) return;
+    wrap.dataset.wired = "1";
     var tooltip = wrap.querySelector('.chart-tooltip');
     if (!tooltip) return;
     var marks = wrap.querySelectorAll('[data-tooltip]');
@@ -93,7 +106,29 @@ CHARTS_SCRIPT = """
       mark.addEventListener('focus', function () { show(null); });
       mark.addEventListener('blur', hide);
     });
+  }
+
+  document.querySelectorAll('.chart-wrap').forEach(function (wrap) {
+    // report/compare.py's hidden `.compare-source` bank (one card per
+    // eligible player, easily 200+) is the same shape of problem as a
+    // closed <details> -- nothing in it is visible until its own JS
+    // clones a card out and wires that clone directly.
+    if (wrap.closest('[hidden]')) return;
+    var details = wrap.closest('details');
+    if (!details || details.open) wireChart(wrap);
   });
+
+  document.querySelectorAll('details').forEach(function (details) {
+    details.addEventListener('toggle', function () {
+      if (!details.open) return;
+      details.querySelectorAll('.chart-wrap').forEach(wireChart);
+    });
+  });
+
+  // Exposed for report/compare.py's clone-on-select swap -- a freshly
+  // cloned .compare-card's chart-wrap never went through either path
+  // above (it didn't exist at page load or at any <details> toggle).
+  window.__sharplineWireCharts = wireChart;
 })();
 """
 
@@ -282,3 +317,114 @@ def team_comparison_chart(home_stats: dict, away_stats: dict, home_name: str, aw
     <span class="chart-legend-item"><span class="chart-legend-swatch" style="background: var(--series-2);"></span>{_esc(away_name)}</span>
   </div>
 </div>"""
+
+
+# ---- chart 4: team hub -- rolling EPA/play trend --------------------------
+
+def team_epa_trend_chart(weekly: list[dict], width: int = 560, height: int = 170) -> str:
+    """weekly: [{season, week, off_epa, def_epa}, ...] chronological, one
+    team's own rolling offensive/defensive EPA-per-play through each week
+    of a single season. A genuine two-line chart (not team_comparison_chart's
+    small multiples) since both series already share one scale here. Empty
+    string under 2 points -- see this module's docstring on not
+    chart-shaping nothing."""
+    if not weekly or len(weekly) < 2:
+        return ""
+
+    pad_l, pad_r, pad_t, pad_b = 8, 8, 16, 22
+    plot_w, plot_h = width - pad_l - pad_r, height - pad_t - pad_b
+    n = len(weekly)
+
+    all_vals = [w["off_epa"] for w in weekly] + [w["def_epa"] for w in weekly]
+    lo, hi = min(all_vals), max(all_vals)
+    if lo == hi:
+        lo, hi = lo - 0.05, hi + 0.05
+    span = hi - lo
+    lo, hi = lo - span * 0.1, hi + span * 0.1
+
+    def x_at(i):
+        return pad_l + (i / (n - 1)) * plot_w if n > 1 else pad_l + plot_w / 2
+
+    def y_at(v):
+        return pad_t + (1 - (v - lo) / (hi - lo)) * plot_h
+
+    grid_lines = []
+    if lo <= 0 <= hi:
+        y0 = y_at(0)
+        grid_lines.append(f'<line class="baseline" x1="{pad_l}" y1="{y0:.1f}" x2="{pad_l + plot_w}" y2="{y0:.1f}" />')
+
+    off_pts = [(x_at(i), y_at(w["off_epa"])) for i, w in enumerate(weekly)]
+    def_pts = [(x_at(i), y_at(w["def_epa"])) for i, w in enumerate(weekly)]
+    off_d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in off_pts)
+    def_d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in def_pts)
+
+    marks = []
+    for i, w in enumerate(weekly):
+        ox, oy = off_pts[i]
+        dx, dy = def_pts[i]
+        off_tip = f"Week {w['week']}: offense {w['off_epa']:+.2f} EPA/play"
+        def_tip = f"Week {w['week']}: defense allowed {w['def_epa']:+.2f} EPA/play"
+        marks.append(f'<circle class="line-point" cx="{ox:.1f}" cy="{oy:.1f}" r="4" tabindex="0" '
+                     f'role="img" aria-label="{_esc(off_tip)}" data-tooltip="{_esc(off_tip)}" />')
+        marks.append(f'<circle class="line-point is-series-2" cx="{dx:.1f}" cy="{dy:.1f}" r="4" tabindex="0" '
+                     f'role="img" aria-label="{_esc(def_tip)}" data-tooltip="{_esc(def_tip)}" />')
+        if i == 0 or i == n - 1 or i % 3 == 0:
+            marks.append(f'<text class="axis-label" x="{ox:.1f}" y="{height - 4}" text-anchor="middle">W{w["week"]}</text>')
+
+    return f"""<div class="chart-card">
+  <div class="chart-title">Rolling EPA/Play &middot; {weekly[0]['season']} Season</div>
+  <div class="chart-wrap">
+    <svg class="chart-svg" viewBox="0 0 {width} {height}" role="img" aria-label="Offensive and defensive EPA per play by week, {weekly[0]['season']} season">
+      {"".join(grid_lines)}
+      <path class="line-path" d="{off_d}" />
+      <path class="line-path is-series-2" d="{def_d}" />
+      {"".join(marks)}
+    </svg>
+    <div class="chart-tooltip" role="status" aria-live="polite"></div>
+  </div>
+  <div class="chart-legend">
+    <span class="chart-legend-item"><span class="chart-legend-swatch" style="background: var(--accent);"></span>Offense</span>
+    <span class="chart-legend-item"><span class="chart-legend-swatch" style="background: var(--series-2);"></span>Defense allowed</span>
+  </div>
+</div>"""
+
+
+# ---- chart 5: team hub -- per-player TD-prop trend -------------------------
+
+def player_td_trend_chart(games: list[dict], width: int = 280) -> str:
+    """games: chronological [{week, predicted_prob, actual_td}], a single
+    player's last handful of played games. One horizontal bar per game
+    (predicted TD probability that week, reusing props_hit_rate_chart's
+    bar-track/bar-fill language) with a solid dot marking games they
+    actually scored in -- predicted-vs-actual in one row, no second axis
+    or legend needed for a single reader to follow."""
+    if not games:
+        return ""
+
+    row_h, bar_h = 24, 10
+    pad_l, pad_r = 28, 30
+    plot_w = width - pad_l - pad_r
+    height = len(games) * row_h + 4
+
+    rows = []
+    for i, g in enumerate(games):
+        y = 4 + i * row_h
+        prob = g["predicted_prob"]
+        fill_w = max(2, prob * plot_w)
+        scored = g["actual_td"]
+        tooltip = f"Week {g['week']}: model projected {prob * 100:.0f}% TD probability -- {'scored' if scored else 'did not score'}"
+        marker = (f'<circle cx="{pad_l + fill_w + 8:.1f}" cy="{y + bar_h / 2:.1f}" r="4" fill="var(--positive)" />'
+                  if scored else "")
+        rows.append(f"""
+  <text class="axis-label" x="0" y="{y + bar_h - 1}">W{g['week']}</text>
+  <rect class="bar-track" x="{pad_l}" y="{y}" width="{plot_w}" height="{bar_h}" rx="4" />
+  <rect class="bar-fill" x="{pad_l}" y="{y}" width="{fill_w:.1f}" height="{bar_h}" rx="4"
+        tabindex="0" role="img" aria-label="{_esc(tooltip)}" data-tooltip="{_esc(tooltip)}" />
+  {marker}""")
+
+    return f"""<div class="chart-wrap" style="margin-top: 4px;">
+    <svg class="chart-svg" viewBox="0 0 {width} {height}" role="img" aria-label="TD probability by week, last {len(games)} games played, marked dot shows games actually scored in">
+      {"".join(rows)}
+    </svg>
+    <div class="chart-tooltip" role="status" aria-live="polite"></div>
+  </div>"""

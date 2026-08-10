@@ -38,10 +38,14 @@ from report.charts import CHARTS_SCRIPT, CHARTS_STYLE
 from report.leaderboard import LEADERBOARD_STYLE, edge_distribution_chart, leaderboard_html
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
 from report.news_section import NEWS_STYLE, news_section_html
+from report.compare import COMPARE_SCRIPT, COMPARE_STYLE, compare_html
 from report.recap import RECAP_STYLE
+from report.team_hub import TEAM_HUB_STYLE, team_hubs_html
 from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE
 from report.track_record import TRACK_RECORD_STYLE, track_record_html
 from run_week import LOG_PATH, PROPS_LOG_PATH, get_current_week
+from data.team_stats import SCHEDULES_PATH, TEAM_STATS_PATH
+from model.td_ensemble import BACKTEST_PATH
 
 ASSETS_DIR = os.path.join(ROOT_DIR, "report", "assets")
 OUTPUT_DIR = os.path.join(ROOT_DIR, "report", "output")
@@ -198,7 +202,9 @@ PAGE = """<!DOCTYPE html>
 {recap_style}
 {how_it_works_style}
 {leaderboard_style}
-{archive_style}</style>
+{archive_style}
+{team_hub_style}
+{compare_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -231,6 +237,10 @@ PAGE = """<!DOCTYPE html>
   <div class="section-head" id="games">Full Breakdown, Game by Game</div>
   {days}
 
+  {team_hubs_section}
+
+  {compare_section}
+
   {track_record_section}
 
   {archive_section}
@@ -249,7 +259,8 @@ PAGE = """<!DOCTYPE html>
   <a href="#how-it-works">About</a>
 </nav>
 <script>{cards_script}
-{charts_script}</script>
+{charts_script}
+{compare_script}</script>
 </body>
 </html>
 """
@@ -391,6 +402,17 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     leaderboard_section = leaderboard_html(predictions, props, embed_logo_fn=embed)
     edge_distribution_section = edge_distribution_chart(predictions, props)
 
+    # Round 2 UX, item #58: same cached parquet files data/team_stats.py
+    # and model/td_ensemble.py already maintain, no live fetch.
+    team_stats_df = pd.read_parquet(TEAM_STATS_PATH) if os.path.exists(TEAM_STATS_PATH) else pd.DataFrame()
+    schedules_df = pd.read_parquet(SCHEDULES_PATH) if os.path.exists(SCHEDULES_PATH) else pd.DataFrame()
+    td_backtest_df = pd.read_parquet(BACKTEST_PATH) if os.path.exists(BACKTEST_PATH) else pd.DataFrame()
+    team_hubs_section = team_hubs_html(
+        predictions, props, team_stats_df, schedules_df, td_backtest_df, row_data_fn=row_dict)
+    # headshot_url_fn=None: same reason row_dict() above passes None --
+    # external images can't load in a self-contained Artifact.
+    compare_section = compare_html(props, td_backtest_df, headshot_url_fn=None, logo_url_fn=embed)
+
     metrics = _model_metrics()
     # "xgboost" is read aloud as "ex-gee-boost" (vowel sound) same as
     # "ensemble" -- only "logistic" actually wants "a", not "an".
@@ -402,6 +424,8 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         news_style=NEWS_STYLE, news_section=news_section_html(news),
         track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_section,
         archive_style=ARCHIVE_STYLE, archive_section=archive_section,
+        team_hub_style=TEAM_HUB_STYLE, team_hubs_section=team_hubs_section,
+        compare_style=COMPARE_STYLE, compare_section=compare_section, compare_script=COMPARE_SCRIPT,
         alt_lines_style=ALT_LINES_STYLE, charts_style=CHARTS_STYLE, charts_script=CHARTS_SCRIPT,
         recap_style=RECAP_STYLE, how_it_works_style=HOW_IT_WORKS_STYLE, how_it_works_section=HOW_IT_WORKS_HTML,
         leaderboard_style=LEADERBOARD_STYLE, leaderboard_section=leaderboard_section,

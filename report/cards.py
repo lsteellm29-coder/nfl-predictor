@@ -173,7 +173,7 @@ def _initials(name: str) -> str:
     return name[:2].upper() if name else "??"
 
 
-def _headshot_html(player: str, team: str, espn_id, headshot_url_fn, logo_url_fn=None) -> str:
+def headshot_html(player: str, team: str, espn_id, headshot_url_fn, logo_url_fn=None) -> str:
     """Fallback chain (QA spec Section 3): real headshot -> team logo
     placeholder -> initials, so a card is never blank or visibly broken.
     The headshot-to-logo step happens via the image's own onerror handler
@@ -284,7 +284,7 @@ def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
 
     return f"""<div class="pcard" data-team="{row['team']}" data-pos="{row.get('position') or ''}" data-stat="{row['stat']}" data-edge="{edge_sort}" data-player="{player_search_key}">
   <div class="pcard-head">
-    {_headshot_html(row['player'], row['team'], row.get('espn_id'), headshot_url_fn, logo_url_fn)}
+    {headshot_html(row['player'], row['team'], row.get('espn_id'), headshot_url_fn, logo_url_fn)}
     <div>
       <div class="pcard-name">{html.escape(row['player'])}</div>
       <div class="pcard-meta">{row['team']} &middot; {row.get('position') or '--'}</div>
