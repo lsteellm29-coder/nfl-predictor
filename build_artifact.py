@@ -37,7 +37,7 @@ from report.cards import CARDS_SCRIPT, CARDS_STYLE, confidence_tier
 from report.charts import CHARTS_SCRIPT, CHARTS_STYLE
 from report.leaderboard import LEADERBOARD_STYLE, edge_distribution_chart, leaderboard_html
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
-from report.news_section import NEWS_STYLE, news_section_html
+from report.news_section import NEWS_STYLE, news_tab_html
 from report.compare import COMPARE_SCRIPT, COMPARE_STYLE, compare_html
 from report.recap import RECAP_STYLE
 from report.team_hub import TEAM_HUB_STYLE, team_hubs_html
@@ -223,8 +223,14 @@ PAGE = """<!DOCTYPE html>
 
   <div class="caveat">{model_type_article} {model_type} model trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record), Elo ratings, injury reports, and weather, versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Informed estimates, not guarantees.</div>
 
-  {news_section}
+  <div class="top-tabs" role="tablist">
+    <button type="button" class="top-tab is-active" data-tab-target="predictions" role="tab"
+            aria-selected="true" id="tab-btn-predictions" aria-controls="tab-panel-predictions">Predictions</button>
+    <button type="button" class="top-tab" data-tab-target="news" role="tab"
+            aria-selected="false" id="tab-btn-news" aria-controls="tab-panel-news">News</button>
+  </div>
 
+  <div class="tab-panel" data-tab-panel="predictions" id="tab-panel-predictions" role="tabpanel" aria-labelledby="tab-btn-predictions">
   {hero_section}
 
   <div class="section-head" id="slate"><span class="accent">&#9679;</span> This Week's Slate</div>
@@ -247,6 +253,12 @@ PAGE = """<!DOCTYPE html>
   {archive_section}
 
   {how_it_works_section}
+  </div>
+
+  <div class="tab-panel" data-tab-panel="news" id="tab-panel-news" role="tabpanel" aria-labelledby="tab-btn-news" hidden>
+    <div class="section-head">News</div>
+    {news_section}
+  </div>
 
   <footer>
     Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
@@ -422,7 +434,7 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         week=week, season=season, n_games=n_games,
         days="\n".join(days_html), theme_style=THEME_STYLE, print_style=PRINT_STYLE,
         cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
-        news_style=NEWS_STYLE, news_section=news_section_html(news),
+        news_style=NEWS_STYLE, news_section=news_tab_html(news, predictions),
         track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_section,
         archive_style=ARCHIVE_STYLE, archive_section=archive_section,
         team_hub_style=TEAM_HUB_STYLE, team_hubs_section=team_hubs_section,

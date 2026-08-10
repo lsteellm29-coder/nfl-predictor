@@ -422,6 +422,25 @@ function _spSortAndFilterGrid(bar) {
   ordered.forEach(function (card) { grid.appendChild(card); });
 }
 
+function _spFilterNewsTab(bar) {
+  // News tab filter bar (Combined Build Plan Part 5) -- category and team
+  // buttons, exclusive-select per group same as _spSortAndFilterGrid, but
+  // a news item can carry up to two teams (data-teams is space-separated)
+  // rather than one, and there's no sort/search here.
+  var container = bar.parentElement;
+  if (!container) return;
+  var active = {};
+  bar.querySelectorAll('.filter-btn.is-active').forEach(function (b) {
+    active[b.dataset.filterType] = b.dataset.filterValue;
+  });
+  container.querySelectorAll('.news-item-wrap').forEach(function (item) {
+    var teams = (item.dataset.teams || '').split(' ');
+    var ok = (!active.category || item.dataset.category === active.category)
+      && (!active.team || teams.indexOf(active.team) !== -1);
+    item.style.display = ok ? '' : 'none';
+  });
+}
+
 document.addEventListener('click', function (e) {
   var shareBtn = e.target.closest('[data-share-card]');
   if (shareBtn) {
@@ -452,7 +471,18 @@ document.addEventListener('click', function (e) {
       });
       if (!wasActive) btn.classList.add('is-active');
     }
-    _spSortAndFilterGrid(bar);
+    // The News tab's filter bar (category + team) shares this exact
+    // toggle-one-active-per-group behavior with the props filter bar,
+    // but filters a plain list of .news-item-wrap divs, not a
+    // .card-grid of .pcard elements -- different enough downstream
+    // (multi-team data-teams vs. single-value data-team, no sort) to
+    // warrant its own apply function rather than overloading
+    // _spSortAndFilterGrid with a second shape it'd have to branch on.
+    if (bar.classList.contains('news-filter-bar')) {
+      _spFilterNewsTab(bar);
+    } else {
+      _spSortAndFilterGrid(bar);
+    }
   }
 });
 
@@ -764,5 +794,44 @@ function _spExportCard(cardEl) {
   btn.setAttribute('aria-label', 'Print this page or save it as a PDF');
   btn.addEventListener('click', function () { window.print(); });
   masthead.appendChild(btn);
+})();
+
+// Top-level Predictions/News tabs (Combined Build Plan Part 5). A tab
+// click shows one .tab-panel and hides the other; nothing here decides
+// content, only visibility -- both panels render fully server-side.
+(function () {
+  var tabs = document.querySelectorAll('.top-tab');
+  if (!tabs.length) return;
+
+  function activate(target) {
+    document.querySelectorAll('.top-tab').forEach(function (t) {
+      var isTarget = t.dataset.tabTarget === target;
+      t.classList.toggle('is-active', isTarget);
+      t.setAttribute('aria-selected', isTarget ? 'true' : 'false');
+    });
+    document.querySelectorAll('.tab-panel').forEach(function (p) {
+      p.hidden = p.dataset.tabPanel !== target;
+    });
+  }
+
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () { activate(t.dataset.tabTarget); });
+  });
+
+  // Any same-page anchor link -- the bottom-nav's #slate/#games/#track-
+  // record/etc, or a News item's "View prediction" cross-link -- can
+  // target something that lives inside whichever tab panel isn't
+  // currently showing. The browser's own anchor-jump is a default action
+  // that runs after this listener, so switching the panel's visibility
+  // here (synchronously, before that happens) is enough to make the jump
+  // land somewhere actually visible instead of a no-op on a hidden panel.
+  document.addEventListener('click', function (e) {
+    var link = e.target.closest('a[href^="#"]');
+    if (!link) return;
+    var id = link.getAttribute('href').slice(1);
+    var el = document.getElementById(id);
+    var panel = el && el.closest('.tab-panel');
+    if (panel) activate(panel.dataset.tabPanel);
+  });
 })();
 """

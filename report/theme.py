@@ -150,6 +150,23 @@ a { color: inherit; }
   margin: 16px 0 24px;
 }
 
+/* ---- top-level Predictions/News tabs (Combined Build Plan Part 5) ----
+   Same underlying idea as .filter-btn (a pill of buttons that toggles
+   which content shows) but styled as primary navigation, not a
+   secondary filter -- an underline on the active tab rather than a
+   filled pill, since this switches the whole page's content, not just
+   narrows one grid. */
+.top-tabs { display: flex; gap: 4px; margin: 20px 0 4px; border-bottom: 1px solid var(--border); }
+.top-tab {
+  font-family: 'Oswald', sans-serif; font-size: 14px; font-weight: 700; letter-spacing: 0.03em;
+  text-transform: uppercase; padding: 10px 16px; border: none; border-bottom: 2px solid transparent;
+  background: none; color: var(--muted); cursor: pointer; margin-bottom: -1px;
+}
+.top-tab:hover { color: var(--ink); }
+.top-tab.is-active { color: var(--accent); border-bottom-color: var(--accent); }
+.top-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tab-panel[hidden] { display: none; }
+
 .statline {
   display: flex;
   gap: 0;
@@ -380,9 +397,14 @@ PRINT_STYLE = """
      back. Hiding it isn't losing information -- the definitions/values
      these controls gate are still printed, just not gated. */
   .bottom-nav, .print-page-btn, .fav-star, .card-share-btn, .filter-bar,
-  .info-icon, .chart-tooltip, .sort-btn, .compare-controls select {
+  .info-icon, .chart-tooltip, .sort-btn, .compare-controls select, .top-tabs {
     display: none !important;
   }
+
+  /* Tabs are a screen-only navigation device -- paper has no "switch tab"
+     gesture, so print shows both the Predictions and News content in one
+     pass rather than whichever one happened to be selected on screen. */
+  .tab-panel[hidden] { display: block !important; }
 
   /* Every <details> disclosure in this codebase (card-section, card-detail,
      team-hub, archive week) defaults closed -- exactly the state that's

@@ -25,7 +25,7 @@ from report.charts import CHARTS_SCRIPT, CHARTS_STYLE, team_comparison_chart
 from report.leaderboard import LEADERBOARD_STYLE, edge_distribution_chart, leaderboard_html
 from report.logos import get_logo_url
 from report.narrative import phrase_lead_narrative
-from report.news_section import NEWS_STYLE, news_section_html
+from report.news_section import NEWS_STYLE, news_tab_html
 from report.props import props_section_html
 from report.compare import COMPARE_SCRIPT, COMPARE_STYLE, compare_html
 from report.recap import RECAP_STYLE
@@ -186,8 +186,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   <div class="caveat">{model_type_article} {model_type} model trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record), Elo ratings, injury reports, and weather, versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Player props (where posted) use each player's own season rate, adjusted for the opponent's defense-by-position stats and current injury status, against a normal or Poisson distribution depending on the stat. Every "Higher/Lower" and team button below is colored to match what the model actually calculated, not dressed up for effect -- a thin edge shows as a thin edge. Informed estimates, not guarantees.</div>
 
-  {news_section}
+  <div class="top-tabs" role="tablist">
+    <button type="button" class="top-tab is-active" data-tab-target="predictions" role="tab"
+            aria-selected="true" id="tab-btn-predictions" aria-controls="tab-panel-predictions">Predictions</button>
+    <button type="button" class="top-tab" data-tab-target="news" role="tab"
+            aria-selected="false" id="tab-btn-news" aria-controls="tab-panel-news">News</button>
+  </div>
 
+  <div class="tab-panel" data-tab-panel="predictions" id="tab-panel-predictions" role="tabpanel" aria-labelledby="tab-btn-predictions">
   {leaderboard_section}
   {edge_distribution_section}
 
@@ -202,6 +208,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   {archive_section}
 
   {how_it_works_section}
+  </div>
+
+  <div class="tab-panel" data-tab-panel="news" id="tab-panel-news" role="tabpanel" aria-labelledby="tab-btn-news" hidden>
+    <div class="section-head">News</div>
+    {news_section}
+  </div>
 
   <footer>
     Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
@@ -605,7 +617,7 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
     return HTML_TEMPLATE.format(
         week=week, season=season, n_games=len(predictions), days="\n".join(days_html),
         theme_style=THEME_STYLE, print_style=PRINT_STYLE, cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
-        news_style=NEWS_STYLE, news_section=news_section_html(news),
+        news_style=NEWS_STYLE, news_section=news_tab_html(news, predictions),
         track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_html(log_df, props_log_df),
         archive_style=ARCHIVE_STYLE, archive_section=archive_html(log_df),
         team_hub_style=TEAM_HUB_STYLE, team_hubs_section=team_hubs_section,
