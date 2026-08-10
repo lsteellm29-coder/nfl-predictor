@@ -14,7 +14,7 @@ DataFrame-round-tripped-NaN case."""
 
 import pandas as pd
 
-from report.cards import prop_card_html
+from report.cards import confidence_tier, game_pick_card_html, prop_card_html
 
 BASE_ROW = {
     "player": "Test Player", "team": "SEA", "position": "WR", "stat": "anytime_td",
@@ -61,3 +61,46 @@ def test_edge_real_float_renders_absolute_value():
     row = {**BASE_ROW, "edge": -0.23}
     html_out = prop_card_html(row, "Home Team", "Away Team", "kickoff", "Opponent")
     assert _extract_data_edge(html_out) == "0.23"
+
+
+# Combined Build Plan Part 2: confidence_tier()'s uncertain flag and
+# game_pick_card_html()'s fallback-caveat rendering.
+def test_confidence_tier_uncertain_forces_toss_up_despite_high_prob():
+    """The whole point of the flag: a 75% favorite still shows 75% in the
+    label (the real number, never hidden), but the color/tier must not
+    read as "strong" when the underlying stats are flagged unreliable."""
+    tier, label = confidence_tier(0.75, uncertain=True)
+    assert tier == "toss-up"
+    assert "75%" in label
+
+
+def test_confidence_tier_not_uncertain_behaves_as_before():
+    tier, _ = confidence_tier(0.75, uncertain=False)
+    assert tier == "strong"
+    tier, _ = confidence_tier(0.75)  # default value must match the pre-existing behavior
+    assert tier == "strong"
+
+
+def test_game_pick_card_renders_caveat_for_flagged_team():
+    game = {
+        "home_win_prob": 0.7, "home_moneyline": -200, "away_moneyline": 170,
+        "edge": 1.2, "spread_line": -3.0, "implied_spread": -4.2, "total_line": 44.0,
+        "confidence_uncertain": True,
+        "home_fallback_caveat": {"prior_season": 2025, "departed": 7, "total_starters": 20, "turnover_pct": 0.35},
+        "away_fallback_caveat": None,
+    }
+    html_out = game_pick_card_html(game, "Home Team", "Away Team")
+    assert "fallback-caveat" in html_out
+    assert "2025" in html_out
+    assert "Home Team" in html_out
+    assert "side-toss-up" in html_out  # tier nudged despite 70% raw probability
+
+
+def test_game_pick_card_no_caveat_html_when_nothing_flagged():
+    game = {
+        "home_win_prob": 0.7, "home_moneyline": -200, "away_moneyline": 170,
+        "edge": 1.2, "spread_line": -3.0, "implied_spread": -4.2, "total_line": 44.0,
+    }
+    html_out = game_pick_card_html(game, "Home Team", "Away Team")
+    assert "fallback-caveat" not in html_out
+    assert "side-over" in html_out  # normal strong-tier color, not toss-up

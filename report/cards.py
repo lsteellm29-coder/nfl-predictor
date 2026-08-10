@@ -24,15 +24,24 @@ STAT_LABEL = {"anytime_td": "Anytime TD"}
 CONFIDENCE_THRESHOLD = 0.60
 
 
-def confidence_tier(prob: float) -> tuple[str, str]:
+def confidence_tier(prob: float, uncertain: bool = False) -> tuple[str, str]:
     """prob: the model's probability for whichever side is being colored
     (always >=0.5 by construction -- confidence is only ever shown on the
     side the model actually favors). Returns (css class suffix, label).
     The label always carries the real percentage, toss-up included --
     only the color (via the css class) signals the tier; the number
-    itself shouldn't disappear just because it's a weak lean."""
+    itself shouldn't disappear just because it's a weak lean.
+
+    uncertain (Combined Build Plan Part 2 step 3): forces the toss-up
+    color even when prob alone would earn "strong" -- for a prediction
+    leaning on prior-season fallback stats for a team whose roster has
+    turned over significantly since (model/predict.py's
+    fallback_confidence_caveat()). This nudges the DISPLAYED tier only;
+    prob itself, and the model's own number behind it, are untouched --
+    a real 68% still reads as 68%, just not painted with the same
+    confidence a stable team's real 68% would earn."""
     label = f"Model favors {prob * 100:.0f}%"
-    if prob >= CONFIDENCE_THRESHOLD:
+    if prob >= CONFIDENCE_THRESHOLD and not uncertain:
         return "strong", label
     return "toss-up", label
 
@@ -127,6 +136,8 @@ CARDS_STYLE = """
 .split-side.side-under { background: var(--negative-soft, #FBEAEA); border-color: var(--negative, #B23A3A); color: var(--negative, #B23A3A); }
 .split-side.side-toss-up { background: var(--warning-soft, #FFF6D9); border-color: var(--warning, #8A6D00); color: var(--warning, #8A6D00); }
 .no-line-badge { font-size: 12px; color: var(--muted, #666E7D); background: var(--paper, #F4F5F8); border: 1px dashed var(--border, #E1E4EA); border-radius: 8px; padding: 8px 10px; text-align: center; }
+.fallback-caveat { font-size: 12px; color: var(--warning, #8A6D00); background: var(--warning-soft, #FFF6D9); border: 1px solid var(--warning, #8A6D00); border-radius: 8px; padding: 8px 10px; line-height: 1.4; }
+.fallback-caveat + .fallback-caveat { margin-top: 6px; }
 
 .card-detail summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--accent, #A8710F); list-style: none; }
 .card-detail summary::-webkit-details-marker { display: none; }
@@ -344,6 +355,18 @@ def _fmt_ml(value) -> str:
     return f"{value:+.0f}"
 
 
+def fallback_caveat_text(caveat: dict | None, full_name: str) -> str | None:
+    """Combined Build Plan Part 2 step 3: renders model/predict.py's
+    fallback_confidence_caveat() structured data into the actual display
+    sentence, once the caller has the team's full name in hand (that
+    module only ever deals in abbreviations)."""
+    if not caveat:
+        return None
+    return (f"Built on {caveat['prior_season']} data -- {full_name}'s roster has changed "
+            f"significantly since then ({caveat['departed']}/{caveat['total_starters']} "
+            f"regular starters are no longer on the team).")
+
+
 def game_pick_card_html(game: dict, home_full: str, away_full: str) -> str:
     """The main game-level pick, styled the same as the prop cards --
     each team gets its own button, only the model's actual favored side
@@ -355,11 +378,19 @@ def game_pick_card_html(game: dict, home_full: str, away_full: str) -> str:
     if home_prob is None or pd.isna(home_prob):
         return ""
     home_favored = home_prob >= 0.5
-    tier, conf = confidence_tier(home_prob if home_favored else 1 - home_prob)
+    uncertain = bool(game.get("confidence_uncertain"))
+    tier, conf = confidence_tier(home_prob if home_favored else 1 - home_prob, uncertain=uncertain)
     home_class = "side-toss-up" if tier == "toss-up" else ("side-over" if home_favored else "")
     away_class = "side-toss-up" if tier == "toss-up" else ("side-under" if not home_favored else "")
     home_conf = f'<span class="side-conf">{conf}</span>' if home_favored else ""
     away_conf = f'<span class="side-conf">{conf}</span>' if not home_favored else ""
+
+    caveat_lines = [
+        fallback_caveat_text(game.get("home_fallback_caveat"), home_full),
+        fallback_caveat_text(game.get("away_fallback_caveat"), away_full),
+    ]
+    caveat_html = "".join(
+        f'<div class="fallback-caveat">{html.escape(line)}</div>' for line in caveat_lines if line)
 
     home_ml, away_ml = _fmt_ml(game.get("home_moneyline")), _fmt_ml(game.get("away_moneyline"))
     edge = game.get("edge")
@@ -382,6 +413,7 @@ def game_pick_card_html(game: dict, home_full: str, away_full: str) -> str:
   </div>
   {edge_row}
   <div class="pcard-matchup">{info_icon('Market Spread')}: {spread_str} &middot; {info_icon('Model Projection')}: {model_str} &middot; Total (Vegas -- not modeled): {total_str}</div>
+  {caveat_html}
 </div>"""
 
 

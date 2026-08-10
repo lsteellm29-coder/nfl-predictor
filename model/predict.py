@@ -76,6 +76,145 @@ def _fallback_stats(season: int) -> pd.DataFrame:
     return prior.sort_values("week").groupby("team").tail(1)
 
 
+# Combined Build Plan Part 2 (Preseason / Season-Not-Started Detection):
+# _fallback_stats() above silently treats a team's final prior-season
+# rolling stats as this season's estimate whenever there's no current-
+# season sample yet -- reasonable as the best available number, but it
+# never told a viewer that's what happened, or how much the roster
+# behind that number has actually turned over since. The functions below
+# build that risk signal for report/cards.py's display layer; neither
+# one changes what get_pregame_stats() feeds the model itself -- this is
+# strictly a "how much should a viewer trust this" caveat, not a second,
+# silent adjustment to the prediction (spec's own explicit requirement).
+FALLBACK_GAMES_THRESHOLD = 3  # spec: "under ~2-3 games played" counts as a thin current-season sample
+MEANINGFUL_SNAP_PCT = 0.50  # "starters/high-snap, not depth-chart bottom"
+MEANINGFUL_MIN_GAMES = 4
+# qa/validate_rosters.py's year_over_year_changes() already documents
+# normal season-over-season NFL roster churn as commonly 15-25% -- this
+# has to sit clearly above that range, or the caveat would fire for
+# nearly every team every offseason instead of flagging teams that have
+# genuinely changed more than normal.
+TURNOVER_CAVEAT_THRESHOLD = 0.35
+
+
+def _normalize_name(name: str) -> str:
+    """Same normalization data/fetch_firecrawl_sources.py's own copy
+    applies -- nfl_data_py's snap-count table (PFR-sourced) and its
+    seasonal-roster table (nflverse-sourced) don't always agree on
+    suffix formatting for the same real person. Kept as a local copy
+    rather than a shared import, same precedent that module's own copy
+    already set for this codebase's independent-source name matching."""
+    import re
+    name = name.replace(".", "")
+    name = re.sub(r"\s+(jr|sr|ii|iii|iv)$", "", name, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", name).strip().lower()
+
+
+def _meaningful_usage_players(season: int) -> dict[str, set[str]]:
+    """team -> normalized names of that team's real starters/high-snap
+    players in `season` -- averaged >= MEANINGFUL_SNAP_PCT offensive OR
+    defensive snap share across >= MEANINGFUL_MIN_GAMES games, nfl_data_py's
+    import_snap_counts() (Pro-Football-Reference sourced). Snap share is
+    a direct usage measurement, not a proxy reconstructed from touches/
+    targets -- the actual "starter vs. depth chart" signal the spec asks
+    for, not an approximation of it."""
+    snaps = nfl.import_snap_counts([season])
+    snaps = snaps[snaps["game_type"] == "REG"]
+    if snaps.empty:
+        return {}
+    snap_pct = snaps[["offense_pct", "defense_pct"]].max(axis=1)
+    snaps = snaps.assign(snap_pct=snap_pct)
+    agg = snaps.groupby(["team", "player"])["snap_pct"].agg(["mean", "size"])
+    starters = agg[(agg["mean"] >= MEANINGFUL_SNAP_PCT) & (agg["size"] >= MEANINGFUL_MIN_GAMES)]
+
+    result: dict[str, set[str]] = {}
+    for (team, player), _ in starters.iterrows():
+        result.setdefault(team, set()).add(_normalize_name(player))
+    return result
+
+
+def team_roster_turnover(season: int) -> dict[str, dict]:
+    """Combined Build Plan Part 2 step 1: for each team, the share of
+    LAST season's real starters/high-snap players (_meaningful_usage_players)
+    who aren't on this season's CURRENT roster at all (data/rosters.py's
+    fetch_rosters(), the same current-season-wins guarantee the roster-
+    integrity fix established elsewhere in this build). A team with no
+    real starters recorded last season (a defunct edge case, not a real
+    NFL team) is simply absent from the result rather than divide-by-zero."""
+    prior_starters = _meaningful_usage_players(season - 1)
+    if not prior_starters:
+        return {}
+
+    current_rosters = fetch_rosters([season])
+    current_by_team: dict[str, set] = {}
+    for team, names in current_rosters.groupby("team")["player_name"]:
+        current_by_team[team] = {_normalize_name(n) for n in names}
+
+    result = {}
+    for team, starters in prior_starters.items():
+        if not starters:
+            continue
+        current_names = current_by_team.get(team, set())
+        departed = sum(1 for p in starters if p not in current_names)
+        result[team] = {
+            "turnover_pct": departed / len(starters),
+            "departed": departed, "total_starters": len(starters),
+        }
+    return result
+
+
+def team_fallback_status(season: int, week: int) -> dict[str, dict]:
+    """Combined Build Plan Part 2 step 2: how many real current-season
+    games each team has played before `week`, and whether that count is
+    thin enough (FALLBACK_GAMES_THRESHOLD) to matter for the display
+    caveat. Deliberately separate from get_pregame_stats()'s own
+    current-vs-fallback stat SELECTION, which already switches to
+    current-season data the moment a team has even one real game (the
+    right call for the model itself) -- "has any current-season data at
+    all" and "has enough of it to outweigh roster-turnover risk" are two
+    different questions, and this function only answers the second one.
+    A team not yet in the schedule's played-games slice at all (true
+    preseason, zero games) gets games_played=0 explicitly, not a missing
+    key."""
+    schedule = nfl.import_schedules([season])
+    all_teams = set(schedule["home_team"]) | set(schedule["away_team"])
+    played = schedule[(schedule["game_type"] == "REG") & schedule["home_score"].notna() & (schedule["week"] < week)]
+    games_played = _team_games_played(played)
+    return {
+        team: {"games_played": int(games_played.get(team, 0)),
+               "thin_sample": games_played.get(team, 0) < FALLBACK_GAMES_THRESHOLD}
+        for team in all_teams
+    }
+
+
+def fallback_confidence_caveat(team: str, prior_season: int, turnover: dict, fallback_status: dict) -> dict | None:
+    """Combined Build Plan Part 2 step 3: the structured caveat data (or
+    None) for one team -- fires only on the intersection of "thin/no
+    current-season sample" AND "meaningfully high roster turnover"
+    (TURNOVER_CAVEAT_THRESHOLD, well above the 15-25% normal-churn
+    range), never on either alone. A thin sample with a stable roster,
+    or a lot of turnover on a team already several games into real
+    form, both stay uncaveated -- this is specifically about the case
+    get_pregame_stats() can't tell apart from a stable team: an old
+    number standing in for a roster that's actually changed a lot.
+
+    Returns structured data, not a formatted sentence -- this module
+    only ever deals in team abbreviations, never full names (that's
+    report/build_report.py's _full_name(), a display-layer concern);
+    report/cards.py's fallback_caveat_text() renders the actual copy
+    once it has the team's full name in hand."""
+    status = fallback_status.get(team)
+    churn = turnover.get(team)
+    if not status or not status["thin_sample"] or not churn:
+        return None
+    if churn["turnover_pct"] < TURNOVER_CAVEAT_THRESHOLD:
+        return None
+    return {
+        "prior_season": prior_season, "departed": churn["departed"],
+        "total_starters": churn["total_starters"], "turnover_pct": churn["turnover_pct"],
+    }
+
+
 def get_current_elo_ratings(season: int) -> dict:
     """Each team's {"off", "def"} Elo ratings as of right now, computed by
     replaying every game from the start of the cached historical window
@@ -390,6 +529,19 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     elo_ratings = get_current_elo_ratings(season)
     blowout_flags, lookahead_flags_now = get_situational_flags(season, week)
 
+    # Combined Build Plan Part 2: computed once per call, same as stats/
+    # elo_ratings above -- both are whole-league lookups, not per-game.
+    try:
+        roster_turnover = team_roster_turnover(season)
+        fallback_status = team_fallback_status(season, week)
+    except Exception as e:
+        # Best-effort display caveat, never allowed to block scoring the
+        # week itself over e.g. a snap-count fetch hiccup -- same fail-
+        # open contract as this function's existing injury-fetch guard
+        # just above.
+        print(f"Warning: couldn't compute roster-turnover confidence caveat ({e}); skipping it this run.")
+        roster_turnover, fallback_status = {}, {}
+
     try:
         injury_impact = fetch_current_injury_impact()
     except requests.RequestException as e:
@@ -423,6 +575,17 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
         feat = _build_features(game, stats, injury_impact, elo_ratings, blowout_flags, lookahead_flags_now)
         row = game.to_dict()
         row["wind_speed"] = feat["wind_speed"] if feat else get_game_wind_speed(game)
+        row["home_fallback_caveat"] = fallback_confidence_caveat(
+            game["home_team"], season - 1, roster_turnover, fallback_status)
+        row["away_fallback_caveat"] = fallback_confidence_caveat(
+            game["away_team"], season - 1, roster_turnover, fallback_status)
+        # Combined Build Plan Part 2 step 3: nudge the DISPLAYED confidence
+        # tier, never the model's own probability -- report/cards.py's
+        # confidence_tier() takes this as an extra "uncertain" flag that
+        # forces the toss-up color regardless of how confident the raw
+        # number looks, same "don't silently adjust, don't silently trust
+        # either" split the spec asks for.
+        row["confidence_uncertain"] = bool(row["home_fallback_caveat"] or row["away_fallback_caveat"])
         row["home_td_scorer"] = get_td_scorer_prediction(
             game["home_team"], game["away_team"], td_inputs, implied_totals, league_avg_implied_total)
         row["away_td_scorer"] = get_td_scorer_prediction(
