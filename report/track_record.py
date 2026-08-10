@@ -20,6 +20,7 @@ situation on the day this section was built.
 import pandas as pd
 
 from report.charts import accuracy_trend_chart, props_hit_rate_chart
+from report.recap import recap_html
 
 STAT_CATEGORY = {
     "pass_yards": "yardage", "rush_yards": "yardage", "rec_yards": "yardage",
@@ -150,6 +151,10 @@ def track_record_html(log_df: pd.DataFrame, props_df: pd.DataFrame) -> str:
     )
 
     body_parts = [statline]
+
+    recap = recap_html()
+    if recap:
+        body_parts.append(recap)
 
     if season["weekly"]:
         # Chart first (the at-a-glance read), the exact same numbers in a

@@ -84,9 +84,14 @@ def _grade_pending(log_df: pd.DataFrame) -> pd.DataFrame:
     return log_df
 
 
-def log_week(predictions: pd.DataFrame, week: int, season: int) -> pd.DataFrame:
+def log_week(predictions: pd.DataFrame, week: int, season: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Returns (full log, newly-graded-this-run subset) -- the second is
+    what report/recap.py's weekly recap is built from, never the full
+    season history (that's the Track Record page's job)."""
     log_df = _load_log()
+    previously_pending_idx = set(log_df.index[log_df["actual_winner"].isna()])
     log_df = _grade_pending(log_df)
+    newly_graded = log_df.loc[sorted(previously_pending_idx & set(log_df.index[log_df["actual_winner"].notna()]))]
 
     rows = []
     for _, game in predictions.iterrows():
@@ -110,7 +115,7 @@ def log_week(predictions: pd.DataFrame, week: int, season: int) -> pd.DataFrame:
 
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     log_df.to_csv(LOG_PATH, index=False)
-    return log_df
+    return log_df, newly_graded
 
 
 def _load_props_log() -> pd.DataFrame:
@@ -204,9 +209,13 @@ def _grade_pending_props(log_df: pd.DataFrame) -> pd.DataFrame:
     return log_df
 
 
-def log_props_week(props: pd.DataFrame, week: int, season: int) -> pd.DataFrame:
+def log_props_week(props: pd.DataFrame, week: int, season: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Returns (full log, newly-graded-this-run subset) -- see log_week()'s
+    docstring for why the second value matters."""
     log_df = _load_props_log()
+    previously_pending_idx = set(log_df.index[log_df["actual_value"].isna()])
     log_df = _grade_pending_props(log_df)
+    newly_graded = log_df.loc[sorted(previously_pending_idx & set(log_df.index[log_df["actual_value"].notna()]))]
 
     market_backed = props[props["has_line"]] if not props.empty else props
     rows = []
@@ -226,7 +235,7 @@ def log_props_week(props: pd.DataFrame, week: int, season: int) -> pd.DataFrame:
 
     os.makedirs(os.path.dirname(PROPS_LOG_PATH), exist_ok=True)
     log_df.to_csv(PROPS_LOG_PATH, index=False)
-    return log_df
+    return log_df, newly_graded
 
 
 def get_current_week(season: int = CURRENT_SEASON) -> int:
@@ -253,11 +262,33 @@ def run_week(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         print(f"Warning: couldn't fetch live news ({e}); reporting without it.")
         news = None
     path = build_report(predictions, week, season, props, news)
-    log_week(predictions, week, season)
+    _, newly_graded_games = log_week(predictions, week, season)
     print(f"Logged predictions -> {LOG_PATH}")
-    log_props_week(props, week, season)
+    _, newly_graded_props = log_props_week(props, week, season)
     print(f"Logged props -> {PROPS_LOG_PATH}")
+
+    _generate_recaps(newly_graded_games, newly_graded_props)
+
     return path
+
+
+def _generate_recaps(newly_graded_games: pd.DataFrame, newly_graded_props: pd.DataFrame) -> None:
+    """One recap per distinct (season, week) that had anything newly
+    graded this run -- a bye week or a late catch-up run can grade more
+    than one week's games at once, and each gets its own recap rather
+    than one blended paragraph. See report/recap.py's docstring for why
+    this only ever runs on the just-graded subset, never full history."""
+    from report.recap import build_recap, save_recap
+
+    weeks = set(map(tuple, newly_graded_games[["season", "week"]].drop_duplicates().to_numpy())) | \
+        set(map(tuple, newly_graded_props[["season", "week"]].drop_duplicates().to_numpy()))
+    for season, week in sorted(weeks):
+        games_slice = newly_graded_games[(newly_graded_games["season"] == season) & (newly_graded_games["week"] == week)]
+        props_slice = newly_graded_props[(newly_graded_props["season"] == season) & (newly_graded_props["week"] == week)]
+        text = build_recap(games_slice, props_slice, int(season), int(week))
+        if text:
+            save_recap(int(season), int(week), text)
+            print(f"Generated recap for Week {week}, {season} -> {text}")
 
 
 def main():

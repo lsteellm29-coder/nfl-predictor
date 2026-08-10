@@ -17,13 +17,17 @@ import pandas as pd
 
 from config import CURRENT_SEASON
 from data.situational import is_short_week
+from report.about import HOW_IT_WORKS_HTML, HOW_IT_WORKS_STYLE
 from report.alt_lines import ALT_LINES_STYLE, alt_lines_html
+from report.archive import ARCHIVE_STYLE, archive_html
 from report.cards import CARDS_SCRIPT, CARDS_STYLE, espn_headshot_url, game_pick_card_html
 from report.charts import CHARTS_SCRIPT, CHARTS_STYLE, team_comparison_chart
+from report.leaderboard import LEADERBOARD_STYLE, edge_distribution_chart, leaderboard_html
 from report.logos import get_logo_url
 from report.narrative import phrase_lead_narrative
 from report.news_section import NEWS_STYLE, news_section_html
 from report.props import props_section_html
+from report.recap import RECAP_STYLE
 from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE, game_anchor, td_chip_parts
 from report.track_record import TRACK_RECORD_STYLE, track_record_html
 
@@ -145,7 +149,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 {news_style}
 {track_record_style}
 {alt_lines_style}
-{charts_style}</style>
+{charts_style}
+{recap_style}
+{how_it_works_style}
+{leaderboard_style}
+{archive_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -164,9 +172,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="caveat">{model_type_article} {model_type} model trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record), Elo ratings, injury reports, and weather, versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Player props (where posted) use each player's own season rate, adjusted for the opponent's defense-by-position stats and current injury status, against a normal or Poisson distribution depending on the stat. Every "Higher/Lower" and team button below is colored to match what the model actually calculated, not dressed up for effect -- a thin edge shows as a thin edge. Informed estimates, not guarantees.</div>
 
   {news_section}
+
+  {leaderboard_section}
+  {edge_distribution_section}
+
   {days}
 
   {track_record_section}
+
+  {archive_section}
+
+  {how_it_works_section}
 
   <footer>
     Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
@@ -558,7 +574,11 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
         theme_style=THEME_STYLE, cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
         track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_html(log_df, props_log_df),
+        archive_style=ARCHIVE_STYLE, archive_section=archive_html(log_df),
         alt_lines_style=ALT_LINES_STYLE, charts_style=CHARTS_STYLE, charts_script=CHARTS_SCRIPT,
+        recap_style=RECAP_STYLE, how_it_works_style=HOW_IT_WORKS_STYLE, how_it_works_section=HOW_IT_WORKS_HTML,
+        leaderboard_style=LEADERBOARD_STYLE, leaderboard_section=leaderboard_html(predictions, props),
+        edge_distribution_section=edge_distribution_chart(predictions, props),
         # Static branding asset (report/assets/social_preview.png, built
         # once via a one-off Pillow script, not regenerated per-run --
         # nothing in it is week-specific), referenced by its path relative

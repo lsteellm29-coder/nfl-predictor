@@ -29,12 +29,16 @@ from config import CURRENT_SEASON
 from data.fetch_news import fetch_news
 from model.player_stats import score_props
 from model.predict import score_week
+from report.about import HOW_IT_WORKS_HTML, HOW_IT_WORKS_STYLE
 from report.alt_lines import ALT_LINES_STYLE
+from report.archive import ARCHIVE_STYLE, archive_html
 from report.build_report import _by_day, _day_header, _model_metrics, _row_data
 from report.cards import CARDS_SCRIPT, CARDS_STYLE, confidence_tier
 from report.charts import CHARTS_SCRIPT, CHARTS_STYLE
+from report.leaderboard import LEADERBOARD_STYLE, edge_distribution_chart, leaderboard_html
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
 from report.news_section import NEWS_STYLE, news_section_html
+from report.recap import RECAP_STYLE
 from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE
 from report.track_record import TRACK_RECORD_STYLE, track_record_html
 from run_week import LOG_PATH, PROPS_LOG_PATH, get_current_week
@@ -190,7 +194,11 @@ PAGE = """<!DOCTYPE html>
 {news_style}
 {track_record_style}
 {alt_lines_style}
-{charts_style}</style>
+{charts_style}
+{recap_style}
+{how_it_works_style}
+{leaderboard_style}
+{archive_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -217,10 +225,17 @@ PAGE = """<!DOCTYPE html>
     {grid_items}
   </div>
 
+  {leaderboard_section}
+  {edge_distribution_section}
+
   <div class="section-head" id="games">Full Breakdown, Game by Game</div>
   {days}
 
   {track_record_section}
+
+  {archive_section}
+
+  {how_it_works_section}
 
   <footer>
     Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
@@ -231,6 +246,7 @@ PAGE = """<!DOCTYPE html>
   <a href="#slate" class="is-accent">Slate</a>
   <a href="#games">Games</a>
   <a href="#track-record">Record</a>
+  <a href="#how-it-works">About</a>
 </nav>
 <script>{cards_script}
 {charts_script}</script>
@@ -367,6 +383,13 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     log_df = pd.read_csv(LOG_PATH) if os.path.exists(LOG_PATH) else pd.DataFrame()
     props_log_df = pd.read_csv(PROPS_LOG_PATH) if os.path.exists(PROPS_LOG_PATH) else pd.DataFrame()
     track_record_section = track_record_html(log_df, props_log_df)
+    archive_section = archive_html(log_df)
+
+    # Master Honing Plan round 2, items #4 + #12: cross-game/prop edge
+    # leaderboard + distribution histogram, embedded logos to match the
+    # rest of this self-contained Artifact build.
+    leaderboard_section = leaderboard_html(predictions, props, embed_logo_fn=embed)
+    edge_distribution_section = edge_distribution_chart(predictions, props)
 
     metrics = _model_metrics()
     # "xgboost" is read aloud as "ex-gee-boost" (vowel sound) same as
@@ -378,7 +401,11 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
         track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_section,
+        archive_style=ARCHIVE_STYLE, archive_section=archive_section,
         alt_lines_style=ALT_LINES_STYLE, charts_style=CHARTS_STYLE, charts_script=CHARTS_SCRIPT,
+        recap_style=RECAP_STYLE, how_it_works_style=HOW_IT_WORKS_STYLE, how_it_works_section=HOW_IT_WORKS_HTML,
+        leaderboard_style=LEADERBOARD_STYLE, leaderboard_section=leaderboard_section,
+        edge_distribution_section=edge_distribution_section,
         hero_section=hero_section, grid_items=grid_items_html,
         model_type=metrics["model_type"], model_type_article=model_type_article,
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
