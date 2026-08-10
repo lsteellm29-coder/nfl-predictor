@@ -33,6 +33,15 @@
 # for why. Playwright (data/fetch_playwright_sources.py) isn't called by
 # this pipeline at all -- built and tested, not currently needed by any
 # source here (see that module's own docstring).
+#
+# Combined Build Plan Part 1 step 3: qa.validate_rosters's run() also
+# writes data/cache/blocked_players.json -- any player balldontlie AND
+# ourlads.com BOTH independently disagree with nfl_data_py about (never
+# just one source, to avoid blocking over a single lagging source) gets
+# held out of that week's props entirely until manually confirmed.
+# model/player_stats.py's score_props() reads that file, so this step
+# has to run before run_week.py below, same reason it already ran before
+# scoring even prior to this change.
 set -euo pipefail
 
 cd "$(dirname "$0")"

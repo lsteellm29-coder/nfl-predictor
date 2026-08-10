@@ -9,7 +9,7 @@ hard-fail (a team with zero props) is computed from."""
 import pandas as pd
 
 from qa.validate_coverage import _position_counts
-from qa.validate_rosters import MIN_ROSTER_SIZE, check_staleness
+from qa.validate_rosters import MIN_ROSTER_SIZE, check_staleness, compute_blocked_players
 
 
 def _roster(team_sizes: dict) -> pd.DataFrame:
@@ -87,3 +87,34 @@ def test_position_counts_only_counts_the_requested_team():
     counts = _position_counts(props, "SEA")
     assert counts["WR"] == 1
     assert sum(counts.values()) == 1
+
+
+def test_compute_blocked_players_requires_both_sources_to_agree():
+    """Combined Build Plan Part 1 step 3's whole point: one source
+    disagreeing with nfl_data_py is informational, not a block -- only
+    when balldontlie AND ourlads.com independently name the SAME
+    alternate team does a player get held out of props."""
+    bdl_mismatches = [
+        {"player": "Player A", "nfl_team": "SEA", "other_team": "NE"},  # confirmed by ourlads below
+        {"player": "Player B", "nfl_team": "KC", "other_team": "DEN"},  # ourlads never flags this one
+    ]
+    ourlads_phantoms = {("NE", "player a")}  # normalized, same shape cross_check_depth_chart produces
+
+    blocked = compute_blocked_players(bdl_mismatches, ourlads_phantoms)
+    assert len(blocked) == 1
+    assert blocked[0]["player"] == "Player A"
+    assert blocked[0]["confirmed_team"] == "NE"
+
+
+def test_compute_blocked_players_empty_inputs_block_nobody():
+    assert compute_blocked_players([], set()) == []
+    assert compute_blocked_players([{"player": "X", "nfl_team": "SEA", "other_team": "NE"}], set()) == []
+
+
+def test_compute_blocked_players_wrong_team_agreement_does_not_block():
+    """ourlads flagging the player on a DIFFERENT team than balldontlie
+    claims isn't agreement -- three sources, three different answers,
+    still nothing confirmed."""
+    bdl_mismatches = [{"player": "Player A", "nfl_team": "SEA", "other_team": "NE"}]
+    ourlads_phantoms = {("KC", "player a")}  # names Player A on KC, not NE
+    assert compute_blocked_players(bdl_mismatches, ourlads_phantoms) == []

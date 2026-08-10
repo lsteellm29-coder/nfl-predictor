@@ -21,11 +21,11 @@ affected by anything this script finds.
 
 import sys
 
-import nfl_data_py as nfl
 import pandas as pd
 
 from config import CURRENT_SEASON
 from data.fetch_week import fetch_week
+from data.rosters import fetch_rosters
 from model.player_stats import (
     COVERAGE_MINIMUMS, _player_season_avg, qb_passing_game_log,
     rb_rushing_game_log, receiving_game_log, required_lineup,
@@ -38,8 +38,7 @@ def _required_starters(week: int, season: int) -> list[dict]:
     """Every required-lineup starter (QA spec's own COVERAGE_MINIMUMS) for
     every team playing this week, with their roster row's espn_id."""
     games = fetch_week(week, season)
-    rosters = nfl.import_seasonal_rosters([season, season - 1])
-    rosters = rosters[rosters["player_id"] != ""]
+    rosters = fetch_rosters([season, season - 1])
     pos_map = dict(zip(rosters["player_id"], rosters["position"]))
     id_to_name = dict(zip(rosters["player_id"], rosters["player_name"]))
     id_to_espn_id = dict(zip(rosters["player_id"], rosters["espn_id"]))

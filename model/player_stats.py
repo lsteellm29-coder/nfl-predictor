@@ -31,6 +31,7 @@ from data.fetch_injuries import USAGE_MULTIPLIER, fetch_current_player_injury_st
 from data.fetch_props import fetch_props_for_week
 from data.fetch_week import fetch_week
 from data.positional_matchups import position_map
+from data.rosters import fetch_rosters
 from model.td_model import (
     player_red_zone_touches, positional_baseline_conversion, project_td_probability_live,
     recency_weighted_touch_share, red_zone_defense_rank, season_to_date, team_red_zone_defense,
@@ -199,16 +200,23 @@ def required_lineup(team: str, rosters: pd.DataFrame,
     who hasn't played) can't be ranked and are left out -- a real
     limitation of leaning on prior performance data, not a bug.
 
-    Known gap: this trusts nfl_data_py's own current-season team
-    assignment at face value, and that source has been observed showing
-    an incorrect team for at least one active player during the
-    preseason (before the season's own games start correcting it) --
-    unlike the market-prop path, there's no independent second source to
-    cross-check a fallback-only player against, so a bad upstream team
-    assignment here won't get caught the way a stale market attribution
-    does. qa/validate_rosters.py's week-over-week diff is the best
-    available defense -- a sudden, implausible team change shows up
-    there for manual review, even though it can't be auto-corrected."""
+    `rosters` is expected to already be deduped to one row per player_id,
+    current season preferred over the season-1 fallback row (score_props()
+    does this before calling in) -- see that sort/dedup's own comment for
+    the real bug it fixes (a returning player's team silently resolving
+    to last season's row).
+
+    Remaining known gap: this still trusts nfl_data_py's own CURRENT-
+    season team assignment at face value once that dedup has picked it --
+    that source has been observed showing an incorrect team for at least
+    one active player during the preseason (before the season's own games
+    start correcting it). Unlike the market-prop path, there's no
+    independent second source to cross-check a fallback-only player
+    against here, so a bad upstream team assignment won't get caught the
+    way a stale market attribution does. qa/validate_rosters.py's
+    cross-source checks (balldontlie, ourlads.com) are the best available
+    defense -- a disagreement shows up there for manual review, even
+    though it can't be auto-corrected from inside this function."""
     avgs_by_pos = {"QB": qb_avgs, "RB": rb_avgs, "WR": rec_avgs, "TE": rec_avgs}
     out = {}
     for position, n in COVERAGE_MINIMUMS.items():
@@ -246,6 +254,30 @@ def _project_td(team: str, opponent: str, player_id: str, position: str | None,
     prob = 1 - math.exp(-expected_tds) if expected_tds > 0 else 0.0
     rank = red_zone_defense_rank(team_def, opponent)
     return prob, ({"rank": rank} if rank else None)
+
+
+def _load_blocked_player_names() -> set[str]:
+    """Combined Build Plan Part 1 step 3: qa/validate_rosters.py's `run()`
+    (a separate, earlier step in weekly_pipeline.sh) persists this list
+    when balldontlie and ourlads.com both independently disagree with
+    nfl_data_py about the same player's team -- two independent sources
+    agreeing is a strong enough signal to hold that player out of props
+    entirely until a human confirms which source is right, rather than
+    guessing. Missing/empty file (never run yet, or nothing flagged)
+    means an empty block set, same fail-open contract as every other
+    optional check in this codebase -- a missing file is "nothing
+    blocked," not an error."""
+    import json
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(project_root, "data", "cache", "blocked_players.json")
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path) as f:
+            blocked = json.load(f)
+        return {b["player"] for b in blocked}
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return set()
 
 
 def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
@@ -290,8 +322,11 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     market = _pivot_market_props(props) if not props.empty else pd.DataFrame(
         columns=["player", "stat", "line", "market_price", "market_over_prob", "home_team", "away_team"])
 
-    rosters = nfl.import_seasonal_rosters([season, season - 1])
-    rosters = rosters[rosters["player_id"] != ""]
+    # data/rosters.py's fetch_rosters() (not a raw nfl.import_seasonal_rosters
+    # call) -- see that module's docstring for the real bug this avoids:
+    # a returning player's team/id fields silently resolving to last
+    # season's row instead of the current one.
+    rosters = fetch_rosters([season, season - 1])
     name_to_id = dict(zip(rosters["player_name"], rosters["player_id"]))
     name_to_team = dict(zip(rosters["player_name"], rosters["team"]))
     name_to_espn_id = dict(zip(rosters["player_name"], rosters["espn_id"]))
@@ -385,14 +420,20 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     except Exception:
         injury_status = {}
 
+    blocked_names = _load_blocked_player_names()
+
     rows = []
     dropped_stale = []
+    blocked_dropped = []
     covered = set()  # (team, player_id) already represented by a market prop
     for _, m in market.iterrows():
         canonical_name = _resolve_market_name(m["player"])
         player_id = name_to_id.get(canonical_name)
         team = name_to_team.get(canonical_name)
         if player_id is None or team is None:
+            continue
+        if canonical_name in blocked_names:
+            blocked_dropped.append(canonical_name)
             continue
         # QA spec Section 1: a market prop's player is only trustworthy if
         # their *current* roster team is actually one of the two teams in
@@ -454,6 +495,9 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
                     if (team, player_id) in covered:
                         continue
                     covered.add((team, player_id))
+                    if id_to_name.get(player_id) in blocked_names:
+                        blocked_dropped.append(id_to_name.get(player_id, player_id))
+                        continue
                     fallback_result = _project_td(team, opponent, player_id, position, touch_share, team_touches,
                                                    team_def, baseline_rates, league_avg_rz_td_rate, injury_status)
                     if fallback_result is None:
@@ -484,6 +528,13 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     if coverage_gaps:
         print(f"score_props: {len(coverage_gaps)} required-lineup slot(s) couldn't be filled even with a fallback:")
         for entry in coverage_gaps:
+            print(f"  - {entry}")
+
+    if blocked_dropped:
+        print(f"score_props: {len(blocked_dropped)} player(s) held out of props -- flagged by "
+              f"qa/validate_rosters.py (balldontlie and ourlads.com both independently disagree with "
+              f"nfl_data_py's team assignment, pending manual confirmation):")
+        for entry in blocked_dropped:
             print(f"  - {entry}")
 
     result = pd.DataFrame(rows)

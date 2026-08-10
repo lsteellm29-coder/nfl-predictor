@@ -24,6 +24,7 @@ from data.fetch_week import fetch_week
 from data.fetch_weather import fetch_forecast
 from data.player_trends import qb_game_log, qb_streak, rb_game_log, rb_streak
 from data.positional_matchups import build_position_tables, game_mismatches, position_map
+from data.rosters import fetch_rosters
 from data.situational import (
     away_travel_penalty, blowout_loss_flags, is_short_week, lookahead_flags,
 )
@@ -232,8 +233,7 @@ def build_td_scorer_inputs(season: int, week: int):
     # model/player_stats.py's required_lineup ranking (a display-coverage
     # concern, not relevant here) and directly matches "who's actually
     # gotten real scoring chances."
-    rosters = nfl.import_seasonal_rosters([season, season - 1])
-    rosters = rosters[rosters["player_id"] != ""]
+    rosters = fetch_rosters([season, season - 1])
     id_to_name = dict(zip(rosters["player_id"], rosters["player_name"]))
     candidates_by_team: dict[str, set] = {}
     for share_table in touch_share:

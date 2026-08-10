@@ -6,8 +6,9 @@ convincing "this team's WRs vs that defense's pass coverage" storyline,
 distinct from the team-wide rolling stats in data/team_stats.py.
 """
 
-import nfl_data_py as nfl
 import pandas as pd
+
+from data.rosters import fetch_rosters
 
 POSITION_GROUPS = ["WR", "TE", "RB"]
 
@@ -26,8 +27,7 @@ def position_map(seasons: list[int]) -> dict:
     position, from seasonal rosters. A season is one snapshot, so a
     mid-season position change (rare) won't be reflected -- fine for a
     narrative use case, not worth a weekly roster pull."""
-    rosters = nfl.import_seasonal_rosters(seasons)
-    rosters = rosters[rosters["player_id"] != ""]
+    rosters = fetch_rosters(seasons)
     return dict(zip(rosters["player_id"], rosters["position"]))
 
 

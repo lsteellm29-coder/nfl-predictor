@@ -235,7 +235,7 @@ def _normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip().lower()
 
 
-def cross_check_depth_chart(team: str, roster_names: set[str]) -> list[str]:
+def cross_check_depth_chart(team: str, roster_names: set[str]) -> list[tuple[str, str, str]]:
     """Flags any ourlads.com depth-chart player for `team` who doesn't
     appear at all in `roster_names` (nfl_data_py's own roster names for
     that team), matched after _normalize_name on both sides -- informational,
@@ -247,13 +247,18 @@ def cross_check_depth_chart(team: str, roster_names: set[str]) -> list[str]:
     different spellings of the same person, but that tradeoff is the
     same one model/player_stats.py already accepted for market-name
     matching -- an unmatched name silently drops out rather than being
-    guessed at, never a wrong flag presented as confident."""
+    guessed at, never a wrong flag presented as confident.
+
+    Returns (player, position, team) tuples rather than pre-formatted
+    strings -- qa/validate_rosters.py's actionable-cross-check upgrade
+    (Combined Build Plan Part 1 step 3) needs the structured (team,
+    player) pair to compare against the balldontlie cross-check's own
+    structured mismatches, not a sentence to re-parse."""
     normalized_roster = {_normalize_name(n) for n in roster_names}
     chart = scrape_team_depth_chart(team)
     flagged = []
     for position, players in chart.items():
         for player in players:
             if _normalize_name(player) not in normalized_roster:
-                flagged.append(f"{player} ({position}) listed on {team}'s ourlads.com depth chart, "
-                                f"not found on {team}'s nfl_data_py roster")
+                flagged.append((player, position, team))
     return flagged

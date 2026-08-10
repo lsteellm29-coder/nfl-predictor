@@ -17,6 +17,7 @@ from data.fetch_balldontlie import fetch_all_players
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "cache")
 SNAPSHOT_PATH = os.path.join(CACHE_DIR, "roster_snapshot.parquet")
+BLOCKED_PLAYERS_PATH = os.path.join(CACHE_DIR, "blocked_players.json")
 
 # An active NFL roster is 53 (plus practice squad) -- well under this is a
 # broken/partial API pull, not a real team thinned by injury or cuts.
@@ -88,26 +89,32 @@ def year_over_year_changes(season: int = CURRENT_SEASON) -> list[str]:
     return lines
 
 
-def cross_check_with_balldontlie(roster: pd.DataFrame) -> list[str]:
+def cross_check_with_balldontlie(roster: pd.DataFrame) -> tuple[list[str], list[dict]]:
     """Cross-references nfl_data_py's roster against balldontlie's
     independent NFL API (data/fetch_balldontlie.py) -- a genuine second
     source, unlike year_over_year_changes()'s same-source comparison.
     Two sources actually disagreeing about a player's team is a much
     stronger signal of a real data problem than either source's own
     season-over-season churn, which normal offseason movement also
-    produces. Best-effort and informational only, never a hard-fail:
-    balldontlie's free tier is aggressively rate-limited, so
-    fetch_all_players() is time-boxed and may only cover part of the
-    league on a given run -- a missing balldontlie entry means "not
-    compared," not "wrong," and an API outage here shouldn't be able to
-    block publishing over a third-party dependency this project doesn't
-    otherwise rely on."""
+    produces. Best-effort, never a hard-fail on its own: balldontlie's
+    free tier is aggressively rate-limited, so fetch_all_players() is
+    time-boxed and may only cover part of the league on a given run --
+    a missing balldontlie entry means "not compared," not "wrong," and
+    an API outage here shouldn't be able to block publishing over a
+    third-party dependency this project doesn't otherwise rely on.
+
+    Returns (print_lines, mismatches) -- `mismatches` is structured
+    ({"player", "nfl_team", "other_team"} dicts) for
+    compute_blocked_players() to cross-reference against the ourlads
+    check (Combined Build Plan Part 1 step 3: a single source's
+    disagreement stays informational; two independent sources agreeing
+    on the SAME alternate team is what actually blocks a player)."""
     try:
         bdl_teams = fetch_all_players()
     except Exception as e:
-        return [f"balldontlie cross-check skipped ({type(e).__name__}: {e})"]
+        return [f"balldontlie cross-check skipped ({type(e).__name__}: {e})"], []
     if not bdl_teams:
-        return ["balldontlie cross-check: no data returned (rate-limited before any page landed?) -- skipped"]
+        return ["balldontlie cross-check: no data returned (rate-limited before any page landed?) -- skipped"], []
 
     mismatches = []
     checked = 0
@@ -117,18 +124,19 @@ def cross_check_with_balldontlie(roster: pd.DataFrame) -> list[str]:
             continue
         checked += 1
         if bdl_team != row["team"]:
-            mismatches.append(f"{row['player_name']}: nfl_data_py has them at {row['team']}, balldontlie has them at {bdl_team}")
+            mismatches.append({"player": row["player_name"], "nfl_team": row["team"], "other_team": bdl_team})
 
     if checked == 0:
-        return ["balldontlie cross-check: fetched player data but matched none by name -- skipped"]
+        return ["balldontlie cross-check: fetched player data but matched none by name -- skipped"], []
     lines = [f"balldontlie cross-check: {checked} players compared, {len(mismatches)} disagreement(s)."]
-    lines.extend(f"  - {m}" for m in mismatches[:20])
+    lines.extend(f"  - {m['player']}: nfl_data_py has them at {m['nfl_team']}, balldontlie has them at {m['other_team']}"
+                 for m in mismatches[:20])
     if len(mismatches) > 20:
         lines.append(f"  ...and {len(mismatches) - 20} more")
-    return lines
+    return lines, mismatches
 
 
-def cross_check_with_ourlads(roster: pd.DataFrame) -> list[str]:
+def cross_check_with_ourlads(roster: pd.DataFrame) -> tuple[list[str], set[tuple[str, str]]]:
     """Cross-references nfl_data_py's roster against ourlads.com's own
     independently-maintained depth charts (data/fetch_firecrawl_sources.py,
     MCP Integration spec) -- another genuine second source, same spirit
@@ -138,19 +146,25 @@ def cross_check_with_ourlads(roster: pd.DataFrame) -> list[str]:
     player nfl_data_py's roster doesn't have anywhere on that team at
     all -- name-format differences between the two sources (nicknames,
     suffixes) mean some false positives are expected here, same
-    tolerance the balldontlie check already accepts; this is informational,
-    never a hard-fail, and a Firecrawl outage/rate-limit/missing API key
-    degrades to "skipped" rather than blocking the run."""
+    tolerance the balldontlie check already accepts; never a hard-fail
+    on its own, and a Firecrawl outage/rate-limit/missing API key
+    degrades to "skipped" rather than blocking the run.
+
+    Returns (print_lines, phantom_pairs) -- `phantom_pairs` is a set of
+    (team, normalized_player_name) ourlads has on a team's depth chart
+    but nfl_data_py's roster doesn't have there at all, for
+    compute_blocked_players() to cross-reference."""
     try:
-        from data.fetch_firecrawl_sources import TEAM_NEWS_URLS, cross_check_depth_chart
+        from data.fetch_firecrawl_sources import TEAM_NEWS_URLS, _normalize_name, cross_check_depth_chart
     except Exception as e:
-        return [f"ourlads.com cross-check skipped ({type(e).__name__}: {e})"]
+        return [f"ourlads.com cross-check skipped ({type(e).__name__}: {e})"], set()
 
     names_by_team: dict[str, set] = {}
     for team, names in roster.groupby("team")["player_name"]:
         names_by_team[team] = set(names)
 
     all_flags = []
+    phantom_pairs: set[tuple[str, str]] = set()
     checked_teams = 0
     for team in TEAM_NEWS_URLS:
         if team not in names_by_team:
@@ -158,19 +172,62 @@ def cross_check_with_ourlads(roster: pd.DataFrame) -> list[str]:
         try:
             flags = cross_check_depth_chart(team, names_by_team[team])
         except Exception as e:
-            all_flags.append(f"  - {team}: cross-check failed ({type(e).__name__}: {e})")
+            all_flags.append(f"{team}: cross-check failed ({type(e).__name__}: {e})")
             continue
         checked_teams += 1
-        all_flags.extend(f"  - {f}" for f in flags)
+        for player, position, flagged_team in flags:
+            all_flags.append(f"{player} ({position}) listed on {flagged_team}'s ourlads.com depth chart, "
+                              f"not found on {flagged_team}'s nfl_data_py roster")
+            phantom_pairs.add((flagged_team, _normalize_name(player)))
 
     if checked_teams == 0:
-        return ["ourlads.com cross-check: no teams could be checked -- skipped"]
+        return ["ourlads.com cross-check: no teams could be checked -- skipped"], set()
     lines = [f"ourlads.com depth-chart cross-check: {checked_teams} team(s) checked, "
              f"{len(all_flags)} discrepancy flag(s)."]
-    lines.extend(all_flags[:20])
+    lines.extend(f"  - {f}" for f in all_flags[:20])
     if len(all_flags) > 20:
         lines.append(f"  ...and {len(all_flags) - 20} more")
-    return lines
+    return lines, phantom_pairs
+
+
+def compute_blocked_players(bdl_mismatches: list[dict], ourlads_phantoms: set[tuple[str, str]]) -> list[dict]:
+    """Combined Build Plan Part 1 step 3: upgrades the two cross-checks
+    above from informational-only to actionable. A single source
+    disagreeing with nfl_data_py isn't enough on its own -- balldontlie
+    and ourlads.com both lag real roster moves sometimes, and the spec's
+    own words are explicit about avoiding "false positives from one
+    lagging source." But when balldontlie says a player is really on
+    team B (not nfl_data_py's team A) AND ourlads.com independently
+    lists that same player on team B's depth chart (not found on team
+    A's), that's two independent sources agreeing on the same specific
+    correction -- a strong enough signal to hard-block the player from
+    that week's props until a human confirms it, rather than continuing
+    to show them under a team two other sources both say is wrong."""
+    from data.fetch_firecrawl_sources import _normalize_name
+
+    blocked = []
+    for m in bdl_mismatches:
+        key = (m["other_team"], _normalize_name(m["player"]))
+        if key in ourlads_phantoms:
+            blocked.append({
+                "player": m["player"], "nfl_team": m["nfl_team"], "confirmed_team": m["other_team"],
+                "reason": f"nfl_data_py has them at {m['nfl_team']}; both balldontlie and ourlads.com "
+                          f"independently say {m['other_team']}",
+            })
+    return blocked
+
+
+def save_blocked_players(blocked: list[dict]) -> None:
+    """Persists this run's blocked-player list (Combined Build Plan
+    Part 1 step 3) so model/player_stats.py's score_props() -- a
+    separate process, run later in the weekly pipeline -- can read it
+    without re-running both cross-checks itself. Always overwrites: a
+    player confirmed correct on a later run (or an upstream fix landing)
+    should stop being blocked, not accumulate forever."""
+    import json
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(BLOCKED_PLAYERS_PATH, "w") as f:
+        json.dump(blocked, f, indent=2)
 
 
 def run(season: int = CURRENT_SEASON, check_ourlads: bool = True) -> bool:
@@ -191,16 +248,29 @@ def run(season: int = CURRENT_SEASON, check_ourlads: bool = True) -> bool:
         print(f"{len(changes)} roster change(s) since last pull:")
         for c in changes[:30]:
             print(f"  - {c}")
+
+    bdl_lines, bdl_mismatches = [], []
+    ourlads_lines, ourlads_phantoms = [], set()
     if not roster.empty:
-        for line in cross_check_with_balldontlie(roster):
+        bdl_lines, bdl_mismatches = cross_check_with_balldontlie(roster)
+        for line in bdl_lines:
             print(line)
         # 32 sequential Firecrawl calls, rate-limited to 11/min on the
         # free tier -- real but bounded time cost (a few minutes) for a
         # weekly job, so on by default; check_ourlads=False is there for
         # a quick local test run that shouldn't wait on it.
         if check_ourlads:
-            for line in cross_check_with_ourlads(roster):
+            ourlads_lines, ourlads_phantoms = cross_check_with_ourlads(roster)
+            for line in ourlads_lines:
                 print(line)
+
+    blocked = compute_blocked_players(bdl_mismatches, ourlads_phantoms)
+    save_blocked_players(blocked)
+    if blocked:
+        print(f"{len(blocked)} player(s) BLOCKED from this week's props (balldontlie and ourlads.com "
+              f"both independently disagree with nfl_data_py's team assignment -- manual confirmation needed):")
+        for b in blocked:
+            print(f"  - {b['player']}: {b['reason']}")
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     if not roster.empty:
