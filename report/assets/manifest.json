@@ -1,0 +1,14 @@
+{
+  "name": "SharpLine -- NFL Predictions",
+  "short_name": "SharpLine",
+  "description": "Accuracy-first NFL predictions -- real win probabilities, real edges against the market, and player props built from the same model.",
+  "start_url": "../output/",
+  "scope": "../",
+  "display": "standalone",
+  "background_color": "#0D0D0D",
+  "theme_color": "#0D0D0D",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

@@ -250,6 +250,25 @@ a { color: inherit; }
   text-align: right;
   white-space: nowrap;
 }
+.matchup-row-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* Client-side favorites/watchlist (Master Honing Plan round 2, item
+   #13) -- browser-storage only, no login/account system, matching this
+   site's currently accountless architecture. Persists in localStorage
+   across visits and across a regenerated weekly page (the storage is
+   keyed by game anchor, e.g. "g-NE-SEA", not by any per-build content,
+   so a favorite survives this file being rebuilt next week). */
+.fav-star {
+  background: none; border: none; cursor: pointer; padding: 2px;
+  font-size: 19px; line-height: 1; color: var(--border);
+  transition: color 150ms ease, transform 150ms ease;
+}
+.fav-star:hover { color: var(--muted); }
+.fav-star.is-favorited { color: var(--accent); }
+.fav-star:active { transform: scale(1.15); }
 .subline {
   font-size: 13px;
   color: var(--muted);
@@ -345,7 +364,11 @@ GAME_BLOCK = """<div class="game" id="{anchor}">
       <div class="names">{away_full} @ {home_full}</div>
       <img src="{home_logo}" alt="{home_team}">
     </div>
-    <div class="kickoff">{kickoff}</div>
+    <div class="matchup-row-right">
+      <button type="button" class="fav-star" data-fav-game="{anchor}"
+              aria-label="Favorite {away_full} at {home_full}" aria-pressed="false">&#9733;</button>
+      <div class="kickoff">{kickoff}</div>
+    </div>
   </div>
   <div class="subline">{coaches}</div>
 

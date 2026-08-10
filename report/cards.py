@@ -494,4 +494,57 @@ document.addEventListener('input', function (e) {
   }
   document.querySelectorAll('details').forEach(animate);
 })();
+
+// Client-side favorites/watchlist (Master Honing Plan round 2, item
+// #13) -- localStorage only, no account/login system. Wrapped in
+// try/catch: some contexts (a sandboxed iframe preview, a browser with
+// storage disabled) throw on any localStorage access at all, and a
+// "star a game" nice-to-have shouldn't be able to break page load.
+(function () {
+  var STORAGE_KEY = 'sharpline_favorite_games';
+
+  function loadFavorites() {
+    try {
+      return JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '[]');
+    } catch (e) {
+      return [];
+    }
+  }
+  function saveFavorites(list) {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+    } catch (e) {
+      // storage unavailable -- the star still toggles visually for this
+      // page view, it just won't persist to the next one.
+    }
+  }
+
+  function paint(star, isFav) {
+    star.classList.toggle('is-favorited', isFav);
+    star.setAttribute('aria-pressed', isFav ? 'true' : 'false');
+    star.textContent = isFav ? '★' : '☆';
+  }
+
+  var favorites = loadFavorites();
+  document.querySelectorAll('.fav-star[data-fav-game]').forEach(function (star) {
+    paint(star, favorites.indexOf(star.dataset.favGame) !== -1);
+  });
+
+  document.addEventListener('click', function (e) {
+    var star = e.target.closest('.fav-star[data-fav-game]');
+    if (!star) return;
+    var gameId = star.dataset.favGame;
+    var current = loadFavorites();
+    var idx = current.indexOf(gameId);
+    if (idx === -1) {
+      current.push(gameId);
+    } else {
+      current.splice(idx, 1);
+    }
+    saveFavorites(current);
+    document.querySelectorAll('.fav-star[data-fav-game="' + gameId + '"]').forEach(function (s) {
+      paint(s, idx === -1);
+    });
+  });
+})();
 """

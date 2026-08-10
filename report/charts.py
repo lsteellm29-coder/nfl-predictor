@@ -37,12 +37,23 @@ CHARTS_STYLE = """
 .chart-svg .value-label { fill: var(--ink); font-size: 11px; font-weight: 600; font-family: 'Inter', sans-serif; }
 .chart-svg .line-path { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .chart-svg .line-point { fill: var(--accent); stroke: var(--surface); stroke-width: 2; cursor: pointer; }
-.chart-svg .line-point:hover, .chart-svg .line-point:focus { fill: var(--ink); outline: none; }
+.chart-svg .line-point:hover { fill: var(--ink); }
+/* Accessibility pass (dataviz skill: "give keyboard focus a visible
+   state"): a plain `outline: none` here previously removed the focus
+   ring on these SVG points with nothing replacing it -- a keyboard user
+   tabbing through the chart got zero visible feedback on which point
+   was focused (WCAG 2.4.7). SVG shapes don't reliably render a CSS
+   `outline` the way HTML elements do across browsers, so this uses a
+   real stroke ring instead, matching marks-and-anatomy.md's own
+   "2px surface ring" marker spec -- visible in both themes since it's
+   drawn in --accent, not relying on the browser's own outline color. */
+.chart-svg .line-point:focus-visible { fill: var(--ink); stroke: var(--accent); stroke-width: 3; }
 .chart-svg .hit-area { fill: transparent; cursor: pointer; }
 .chart-svg .bar-track { fill: var(--surface-raised); }
 .chart-svg .bar-fill { fill: var(--accent); }
 .chart-svg .bar-fill.is-away { fill: var(--series-2); }
 .chart-svg .bar-fill:hover, .chart-svg .hit-area:hover + .bar-fill { filter: brightness(1.15); }
+.chart-svg .bar-fill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .chart-tooltip {
   position: absolute; pointer-events: none; z-index: 5;
   background: var(--ink); color: var(--paper); font-size: 12px; line-height: 1.4;

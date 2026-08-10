@@ -143,6 +143,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta property="og:image" content="{og_image_url}">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%230D0D0D'/%3E%3Ctext x='50' y='69' font-family='Georgia,serif' font-size='58' font-weight='700' fill='%23D4AF37' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
+<!-- Master Honing Plan round 2, item #14: installable-as-a-home-screen-
+     app manifest. Scoped to this plain hostable output, not the Artifact
+     build -- a manifest has to be fetched as a real resource at a stable
+     URL, which only makes sense for something actually deployed/hosted,
+     not a self-contained Artifact page. -->
+<link rel="manifest" href="../assets/manifest.json">
+<link rel="apple-touch-icon" href="../assets/icon-192.png">
+<meta name="theme-color" content="#0D0D0D">
 <style>
 {theme_style}
 {cards_style}
