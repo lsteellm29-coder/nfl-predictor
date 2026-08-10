@@ -74,10 +74,17 @@ CARDS_STYLE = """
 .card-section > summary::after { content: "\\25B8"; display: inline-block; margin-left: 4px; }
 .card-section[open] > summary::after { content: "\\25BE"; }
 
-.filter-bar { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0; }
+.filter-bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
 .filter-btn { font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 999px;
   border: 1px solid var(--border, #E1E4EA); background: var(--surface, #fff); color: var(--muted, #666E7D); cursor: pointer; }
 .filter-btn.is-active { background: var(--accent, #A8710F); border-color: var(--accent, #A8710F); color: #fff; }
+.filter-btn.sort-btn { margin-left: 2px; }
+.filter-btn.sort-btn::before { content: "\\2195"; margin-right: 3px; }
+.prop-search { font-size: 12px; padding: 5px 11px; border-radius: 999px; margin-left: auto;
+  border: 1px solid var(--border, #E1E4EA); background: var(--surface, #fff); color: var(--ink, #171A21);
+  min-width: 140px; }
+.prop-search::placeholder { color: var(--muted, #666E7D); }
+.prop-search:focus { outline: 2px solid var(--accent, #A8710F); outline-offset: 1px; }
 
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 8px; }
 
@@ -259,7 +266,23 @@ def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
         detail_lines.append(f"<p>{html.escape(reasoning)}</p>")
     detail_lines.append(injury_html)
 
-    return f"""<div class="pcard" data-team="{row['team']}" data-pos="{row.get('position') or ''}" data-stat="{row['stat']}">
+    # abs(edge) for sort-by-edge (Master Honing Plan round 2, item #3) --
+    # biggest model-vs-market DISAGREEMENT first, regardless of direction;
+    # -1 for a no-line card (nothing to compare against), so those sort
+    # to the bottom rather than tying with a real 0.0 edge. row["edge"]
+    # is None in the raw dict a no-line card is built from, but a round
+    # trip through pd.DataFrame(rows) (score_props()'s own return path)
+    # coerces that None to float NaN once the column holds a mix of
+    # None and real floats -- `edge is not None` alone doesn't catch a
+    # NaN (nan is not None is True), so this checks pd.isna() instead;
+    # missing that turned into a literal "nan" string in the data-edge
+    # attribute, caught by testing the sort feature live, not by
+    # inspection.
+    edge = row.get("edge")
+    edge_sort = -1 if pd.isna(edge) else abs(edge)
+    player_search_key = html.escape(row["player"].lower())
+
+    return f"""<div class="pcard" data-team="{row['team']}" data-pos="{row.get('position') or ''}" data-stat="{row['stat']}" data-edge="{edge_sort}" data-player="{player_search_key}">
   <div class="pcard-head">
     {_headshot_html(row['player'], row['team'], row.get('espn_id'), headshot_url_fn, logo_url_fn)}
     <div>
@@ -281,9 +304,13 @@ def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
 
 
 def prop_filter_bar_html(rows: list[dict]) -> str:
-    """Team + position filters only -- a "stat" filter dimension no
-    longer makes sense now that anytime-TD is the only prop type every
-    card shares (Anytime-TD-Only Props Refocus spec)."""
+    """Team + position filters, a sort-by-edge toggle, and a player search
+    box (Master Honing Plan round 2, item #3) -- UI-layer only, reads
+    fields score_props() already computes (row['edge'], row['player']) via
+    each card's own data-edge/data-player attributes (prop_card_html), no
+    model changes. A "stat" filter dimension still doesn't make sense --
+    anytime-TD is the only prop type every card shares (Anytime-TD-Only
+    Props Refocus spec)."""
     teams = sorted({r["team"] for r in rows})
     positions = sorted({r.get("position") for r in rows if r.get("position")})
     btns = []
@@ -291,7 +318,12 @@ def prop_filter_bar_html(rows: list[dict]) -> str:
         btns.append(f'<button type="button" class="filter-btn" data-filter-type="team" data-filter-value="{t}">{t}</button>')
     for p in positions:
         btns.append(f'<button type="button" class="filter-btn" data-filter-type="pos" data-filter-value="{p}">{p}</button>')
-    return f'<div class="filter-bar">{"".join(btns)}</div>'
+    sort_btn = '<button type="button" class="filter-btn sort-btn" data-sort="edge">Sort by edge</button>'
+    search_box = (
+        '<input type="search" class="prop-search" placeholder="Find a player&hellip;" '
+        'aria-label="Search props by player name">'
+    )
+    return f'<div class="filter-bar">{"".join(btns)}{sort_btn}{search_box}</div>'
 
 
 def _fmt_ml(value) -> str:
@@ -341,6 +373,42 @@ def game_pick_card_html(game: dict, home_full: str, away_full: str) -> str:
 
 
 CARDS_SCRIPT = """
+function _spSortAndFilterGrid(bar) {
+  // Shared by the team/position filter buttons, the sort-by-edge toggle,
+  // and the player search box (Master Honing Plan round 2, item #3) --
+  // all three narrow/reorder the SAME .card-grid, so one function keeps
+  // them from fighting over card visibility/order independently.
+  var grid = bar.parentElement.querySelector('.card-grid');
+  if (!grid) return;
+
+  var active = {};
+  bar.querySelectorAll('.filter-btn.is-active:not(.sort-btn)').forEach(function (b) {
+    active[b.dataset.filterType] = b.dataset.filterValue;
+  });
+  var search = bar.querySelector('.prop-search');
+  var query = search ? search.value.trim().toLowerCase() : '';
+
+  grid.querySelectorAll('.pcard').forEach(function (card) {
+    var ok = (!active.team || card.dataset.team === active.team)
+      && (!active.pos || card.dataset.pos === active.pos)
+      && (!active.stat || card.dataset.stat === active.stat)
+      && (!query || (card.dataset.player || '').indexOf(query) !== -1);
+    card.style.display = ok ? '' : 'none';
+  });
+
+  var sortBtn = bar.querySelector('.sort-btn.is-active');
+  if (!grid._spOriginalOrder) grid._spOriginalOrder = Array.from(grid.children);
+  var ordered;
+  if (sortBtn) {
+    ordered = Array.from(grid.children).sort(function (a, b) {
+      return parseFloat(b.dataset.edge || -1) - parseFloat(a.dataset.edge || -1);
+    });
+  } else {
+    ordered = grid._spOriginalOrder;
+  }
+  ordered.forEach(function (card) { grid.appendChild(card); });
+}
+
 document.addEventListener('click', function (e) {
   var icon = e.target.closest('.info-icon');
   document.querySelectorAll('.info-tooltip:not([hidden])').forEach(function (t) {
@@ -355,23 +423,23 @@ document.addEventListener('click', function (e) {
   var btn = e.target.closest('.filter-btn');
   if (btn) {
     var bar = btn.closest('.filter-bar');
-    var type = btn.dataset.filterType;
-    var wasActive = btn.classList.contains('is-active');
-    bar.querySelectorAll('.filter-btn[data-filter-type="' + type + '"]').forEach(function (b) {
-      b.classList.remove('is-active');
-    });
-    if (!wasActive) btn.classList.add('is-active');
-
-    var grid = bar.parentElement.querySelector('.card-grid');
-    var active = {};
-    bar.querySelectorAll('.filter-btn.is-active').forEach(function (b) { active[b.dataset.filterType] = b.dataset.filterValue; });
-    grid.querySelectorAll('.pcard').forEach(function (card) {
-      var ok = (!active.team || card.dataset.team === active.team)
-        && (!active.pos || card.dataset.pos === active.pos)
-        && (!active.stat || card.dataset.stat === active.stat);
-      card.style.display = ok ? '' : 'none';
-    });
+    if (btn.classList.contains('sort-btn')) {
+      btn.classList.toggle('is-active');
+    } else {
+      var type = btn.dataset.filterType;
+      var wasActive = btn.classList.contains('is-active');
+      bar.querySelectorAll('.filter-btn[data-filter-type="' + type + '"]').forEach(function (b) {
+        b.classList.remove('is-active');
+      });
+      if (!wasActive) btn.classList.add('is-active');
+    }
+    _spSortAndFilterGrid(bar);
   }
+});
+
+document.addEventListener('input', function (e) {
+  if (!e.target.classList.contains('prop-search')) return;
+  _spSortAndFilterGrid(e.target.closest('.filter-bar'));
 });
 
 // Progressive-enhancement height animation for <details> (props dropdown,

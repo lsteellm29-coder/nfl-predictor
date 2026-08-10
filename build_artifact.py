@@ -32,6 +32,7 @@ from model.predict import score_week
 from report.alt_lines import ALT_LINES_STYLE
 from report.build_report import _by_day, _day_header, _model_metrics, _row_data
 from report.cards import CARDS_SCRIPT, CARDS_STYLE, confidence_tier
+from report.charts import CHARTS_SCRIPT, CHARTS_STYLE
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
 from report.news_section import NEWS_STYLE, news_section_html
 from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE
@@ -188,7 +189,8 @@ PAGE = """<!DOCTYPE html>
 {cards_style}
 {news_style}
 {track_record_style}
-{alt_lines_style}</style>
+{alt_lines_style}
+{charts_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -230,7 +232,8 @@ PAGE = """<!DOCTYPE html>
   <a href="#games">Games</a>
   <a href="#track-record">Record</a>
 </nav>
-<script>{cards_script}</script>
+<script>{cards_script}
+{charts_script}</script>
 </body>
 </html>
 """
@@ -255,6 +258,7 @@ HERO_BLOCK = """<div class="hero" id="hero">
   </div>
 
   <div class="why">{why}</div>
+  {team_comparison_section}
   {props_section}
   {alt_lines_section}
   <div class="subline" style="margin-top:14px;"><a href="#games" style="color: var(--accent);">Jump to the full slate &#8595;</a></div>
@@ -374,7 +378,7 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
         track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_section,
-        alt_lines_style=ALT_LINES_STYLE,
+        alt_lines_style=ALT_LINES_STYLE, charts_style=CHARTS_STYLE, charts_script=CHARTS_SCRIPT,
         hero_section=hero_section, grid_items=grid_items_html,
         model_type=metrics["model_type"], model_type_article=model_type_article,
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",

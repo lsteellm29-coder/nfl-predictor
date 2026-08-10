@@ -17,11 +17,12 @@ import pandas as pd
 
 from config import CURRENT_SEASON
 from data.situational import is_short_week
+from report.alt_lines import ALT_LINES_STYLE, alt_lines_html
 from report.cards import CARDS_SCRIPT, CARDS_STYLE, espn_headshot_url, game_pick_card_html
+from report.charts import CHARTS_SCRIPT, CHARTS_STYLE, team_comparison_chart
 from report.logos import get_logo_url
 from report.narrative import phrase_lead_narrative
 from report.news_section import NEWS_STYLE, news_section_html
-from report.alt_lines import ALT_LINES_STYLE, alt_lines_html
 from report.props import props_section_html
 from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE, game_anchor, td_chip_parts
 from report.track_record import TRACK_RECORD_STYLE, track_record_html
@@ -143,7 +144,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 {cards_style}
 {news_style}
 {track_record_style}
-{alt_lines_style}</style>
+{alt_lines_style}
+{charts_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -170,7 +172,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
   </footer>
 </div>
-<script>{cards_script}</script>
+<script>{cards_script}
+{charts_script}</script>
 </body>
 </html>
 """
@@ -461,6 +464,11 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
     alt_lines_section = alt_lines_html(
         alt_lines_for_game, kickoff=None, home_team=home_full, away_team=away_full)
 
+    team_comparison_section = ""
+    if game.get("home_stats") and game.get("away_stats"):
+        team_comparison_section = team_comparison_chart(
+            game["home_stats"], game["away_stats"], home_full, away_full)
+
     return {
         "away_team": game["away_team"],
         "home_team": game["home_team"],
@@ -490,6 +498,7 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
         "props_section": props_section_html(
             _game_props(props, game), home_full, away_full, kickoff, _full_name, headshot_url_fn, logo_url_fn),
         "alt_lines_section": alt_lines_section,
+        "team_comparison_section": team_comparison_section,
     }
 
 
@@ -549,7 +558,7 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
         theme_style=THEME_STYLE, cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
         track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_html(log_df, props_log_df),
-        alt_lines_style=ALT_LINES_STYLE,
+        alt_lines_style=ALT_LINES_STYLE, charts_style=CHARTS_STYLE, charts_script=CHARTS_SCRIPT,
         # Static branding asset (report/assets/social_preview.png, built
         # once via a one-off Pillow script, not regenerated per-run --
         # nothing in it is week-specific), referenced by its path relative

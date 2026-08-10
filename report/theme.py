@@ -67,6 +67,14 @@ _THEME_TEMPLATE = """
   --negative-soft: #2A1414;
   --warning: #E8C547;
   --warning-soft: #2E2810;
+  /* Second chart-series color (dataviz skill, Master Honing Plan round 2
+     item #1) -- validated against --accent via validate_palette.js:
+     gold+muted failed the normal-vision separation floor (14.9, just
+     under the 15 gate) even though CVD separation itself cleared; this
+     steel-blue passes both cleanly (CVD ΔE 20.9-24.4, normal-vision
+     ΔE 24.4) while still reading as a deliberate, brand-appropriate
+     second color rather than an arbitrary categorical hue. */
+  --series-2: #6E88A8;
   --shadow: 0 1px 2px rgba(0,0,0,0.4);
   --shadow-lift: 0 8px 24px rgba(0,0,0,0.5);
 }
@@ -85,6 +93,7 @@ _THEME_TEMPLATE = """
   --negative-soft: #FBEAEA;
   --warning: #8A6D00;
   --warning-soft: #FFF6D9;
+  --series-2: #4E6485;
   --shadow: 0 1px 2px rgba(25,23,20,0.06);
   --shadow-lift: 0 8px 24px rgba(25,23,20,0.12);
 }
@@ -348,6 +357,7 @@ GAME_BLOCK = """<div class="game" id="{anchor}">
   </div>
 
   <div class="why">{why}</div>
+  {team_comparison_section}
   {props_section}
   {alt_lines_section}
 </div>"""

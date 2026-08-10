@@ -19,6 +19,8 @@ situation on the day this section was built.
 
 import pandas as pd
 
+from report.charts import accuracy_trend_chart, props_hit_rate_chart
+
 STAT_CATEGORY = {
     "pass_yards": "yardage", "rush_yards": "yardage", "rec_yards": "yardage",
     "receptions": "reception_count", "anytime_td": "td",
@@ -150,6 +152,11 @@ def track_record_html(log_df: pd.DataFrame, props_df: pd.DataFrame) -> str:
     body_parts = [statline]
 
     if season["weekly"]:
+        # Chart first (the at-a-glance read), the exact same numbers in a
+        # table right after (dataviz skill: "a table view exists" -- also
+        # just genuinely useful for anyone who wants the precise per-week
+        # figures, not just the shape of the trend).
+        body_parts.append(accuracy_trend_chart(season["weekly"]))
         rows = "\n".join(
             f'<tr><td>Week {w["week"]} &middot; {w["season"]}</td><td class="num">{w["n"]}</td>'
             f'<td class="num">{_pct(w["accuracy"])}</td></tr>'
@@ -158,6 +165,7 @@ def track_record_html(log_df: pd.DataFrame, props_df: pd.DataFrame) -> str:
         body_parts.append(WEEKLY_TABLE.format(rows=rows))
 
     if props["by_category"]:
+        body_parts.append(props_hit_rate_chart(props["by_category"]))
         rows = "\n".join(
             f'<tr><td>{CATEGORY_LABEL.get(cat, cat)}</td><td class="num">{stats["n"]}</td>'
             f'<td class="num">{_pct(stats["hit_rate"])}</td></tr>'
