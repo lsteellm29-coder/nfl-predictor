@@ -164,6 +164,11 @@ def scrape_team_news(team: str, url: str) -> list[dict]:
             "id": article_url, "headline": headline, "description": None,
             "published": published, "url": article_url, "teams": [team], "athlete_espn_ids": [],
             "category": category, "is_actionable": category in {"injury", "suspension", "lineup", "trade"},
+            # Schema parity with data/fetch_news.py's ESPN-sourced rows --
+            # the NLP consensus check (Master Honing Plan, Section D) is
+            # deliberately not run against team-site scrapes (see
+            # fetch_news()'s own docstring on that cost tradeoff).
+            "nlp_disagreement": None,
         })
     return articles
 

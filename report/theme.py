@@ -349,4 +349,5 @@ GAME_BLOCK = """<div class="game" id="{anchor}">
 
   <div class="why">{why}</div>
   {props_section}
+  {alt_lines_section}
 </div>"""

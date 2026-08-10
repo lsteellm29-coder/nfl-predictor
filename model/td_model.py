@@ -31,6 +31,22 @@ from model.td_ensemble import blend_with_classifier
 RED_ZONE_YARDLINE = 20
 GOAL_LINE_YARDLINE = 5
 
+# NOT implemented: granular field-position bins (Master Honing Plan,
+# Section A) -- splitting red-zone touches into goal_line(<=5)/close
+# (6-10)/deep(11-20) sub-rates, each independently shrunk to its own
+# positional baseline, instead of one pooled rz_touches/rz_tds rate per
+# player. Built and A/B tested against the same 2022-2025 walk-forward
+# backtest this module's other constants were tuned against: overall
+# Brier went from 0.1689 to 0.1698-0.1700 and AUC from 0.6681 to
+# 0.6644-0.6653 (tried shrinkage constants from k=10 up to k=90 per
+# zone, flat across the whole range -- the zone split itself, not the
+# shrinkage tuning, is what cost the accuracy). Reverted rather than
+# shipped on a negative result, same call already made once for the
+# position-split red-zone-defense attempt below at a similar magnitude
+# of regression: splitting a bounded touch pool into three thinner slices
+# adds estimation noise per slice that outweighs whatever extra
+# granularity it captures, at this sample size.
+
 # Recency weighting for a player's red-zone share: the last RECENCY_WINDOW
 # games each count RECENCY_WEIGHT_MULTIPLIER times as much as an older
 # game -- usage changes fast (new OC, an injury opening up touches, a

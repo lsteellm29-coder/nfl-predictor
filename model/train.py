@@ -67,6 +67,17 @@ STAT_COLS = [
     # accuracy dropped from 65.9% to 63.9%. Reverted -- still computed and
     # available in team_stats.parquet for narrative/props use, just not a
     # feature that's earned a place in FEATURE_COLS.
+    #
+    # NOT included: off_pressure_rate_allowed_avg/def_pressure_rate_avg
+    # (Master Honing Plan, Section A -- pass-rush pressure rate, added to
+    # data/team_stats.py off/def nflfastR's was_pressure flag). Ablation-
+    # tested the same way: adding both as diffed features dropped ensemble
+    # walk-forward average accuracy from 0.6831 to 0.6686 -- likely
+    # collinear with off_epa_per_play_avg/def_epa_per_play_avg the same
+    # way QB EPA/CPOE was (a pressured dropback already shows up as a bad
+    # EPA play). Reverted; still computed and available in
+    # team_stats.parquet for narrative use (e.g. "pressures X% of
+    # dropbacks, Nth-most in the league").
 ]
 FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
     "home_field_context_diff", "rest_diff", "injury_impact_diff",
@@ -84,6 +95,22 @@ FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
     # accuracy here may not fully replicate in live serving, since the
     # model would be trained on a more-informed line than it actually
     # receives when scoring an upcoming week.
+    #
+    # Investigated (Master Honing Plan, Section A): checked nflverse's own
+    # data dictionary directly (nflreadr/nfldata's DATASETS.md and
+    # dictionary_schedules.csv on GitHub) -- confirmed it genuinely does
+    # not document which point in the betting week spread_line reflects,
+    # this isn't a gap in searching, the upstream source is just silent on
+    # it. A real empirical resolution (comparing model accuracy on
+    # games where open/close plausibly converge vs. the full set) would
+    # need a historical line-MOVEMENT dataset -- both an opening and a
+    # closing value per game -- to be a meaningful test; The Odds API (this
+    # project's only odds source) only ever exposes the CURRENT live line,
+    # never a historical open/close pair for already-completed games, so
+    # there's no available data to run that comparison against honestly.
+    # Left as a documented, currently-irresolvable caveat rather than a
+    # fabricated "fixed" number -- revisit if a historical odds-movement
+    # source ever gets added to this codebase.
     "market_spread",
 ]
 
@@ -156,6 +183,20 @@ def build_feature_frame(
     # roof, or a handful of older outdoor games missing the field) means no
     # wind impact, i.e. 0.
     games["wind_speed"] = games["wind"].fillna(0.0)
+
+    # NOT added: kickoff-time temperature as a feature (Master Honing
+    # Plan, Section A). Built and ablation-tested the same way as
+    # qb_epa_per_play_avg/special_teams_epa_avg below: added temp (NaN/
+    # dome filled with 70.0F, game-level not home/away-diffed, same
+    # treatment as wind_speed) to FEATURE_COLS and re-ran the walk-forward
+    # folds -- ensemble average accuracy fell from 0.6831 to 0.6723.
+    # Reverted rather than shipped on a negative result. Precipitation
+    # wasn't even tried: nflverse's historical schedule data has no precip
+    # column at all (confirmed empirically -- only roof/temp/wind are
+    # present), so there's no historical ground truth to train a precip
+    # feature against, only a live forecast value
+    # (data/fetch_weather.py's precip_prob) with nothing to backtest it
+    # on.
 
     # Section 5 situational spots.
     games["short_week_diff"] = (

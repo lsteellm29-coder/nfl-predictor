@@ -140,11 +140,43 @@ def classify(headline: str, description: str | None, use_nlp_fallback: bool = Fa
     return _NLP_LABEL_TO_CATEGORY.get(result["label"])
 
 
-def parse_articles(articles: list[dict], use_nlp_fallback: bool = False) -> list[dict]:
+def _nlp_disagreement(headline: str, description: str | None, keyword_category: str | None) -> dict | None:
+    """Master Honing Plan, Section D: runs the Hugging Face classifier as
+    a SECOND, independent opinion on every headline the keyword matcher
+    already made a call on (as opposed to use_nlp_fallback above, which
+    only ever runs the model on headlines the keyword matcher found
+    NOTHING for) -- and flags it when the two disagree, rather than
+    picking a winner. The keyword matcher stays authoritative for
+    `category`/`is_actionable` either way, same reasoning as
+    use_nlp_fallback's docstring: it's the one with the actual caught-a-
+    real-case track record. This is strictly a consensus CHECK, meant to
+    surface headlines worth a human glance, not a second vote that
+    changes anything automatically. Returns None when the two agree (the
+    common case -- most headlines aren't actually ambiguous) so callers
+    only see a payload for the cases actually worth looking at."""
+    from model.nlp_classifier import classify_headline
+    text = f"{headline} {description or ''}"
+    result = classify_headline(text)
+    nlp_category = _NLP_LABEL_TO_CATEGORY.get(result["label"]) if result["score"] >= _NLP_MIN_CONFIDENCE else None
+    if nlp_category == keyword_category:
+        return None
+    return {"keyword_category": keyword_category, "nlp_category": nlp_category, "nlp_confidence": result["score"]}
+
+
+def parse_articles(articles: list[dict], use_nlp_fallback: bool = False, use_nlp_consensus_check: bool = False) -> list[dict]:
+    """use_nlp_consensus_check (off by default, same model-load/inference
+    cost as use_nlp_fallback -- see _nlp_disagreement above) runs the HF
+    classifier against every headline and attaches a non-null
+    `nlp_disagreement` field only where it disagrees with the keyword
+    result, for review. Mutually independent of use_nlp_fallback: that
+    flag extends coverage to headlines the keyword matcher missed
+    entirely, this one cross-checks headlines it already called."""
     rows = []
     for a in articles:
         teams, athlete_ids = _extract_tags(a)
-        category = classify(a.get("headline", ""), a.get("description"), use_nlp_fallback)
+        headline, description = a.get("headline", ""), a.get("description")
+        category = classify(headline, description, use_nlp_fallback)
+        nlp_disagreement = _nlp_disagreement(headline, description, category) if use_nlp_consensus_check else None
         rows.append({
             "id": a.get("id"),
             "headline": a.get("headline"),
@@ -155,11 +187,13 @@ def parse_articles(articles: list[dict], use_nlp_fallback: bool = False) -> list
             "athlete_espn_ids": athlete_ids,
             "category": category,
             "is_actionable": category in ACTIONABLE_CATEGORIES,
+            "nlp_disagreement": nlp_disagreement,
         })
     return rows
 
 
-def fetch_news(limit: int = 50, include_team_news: bool = True, use_nlp_fallback: bool = False) -> list[dict]:
+def fetch_news(limit: int = 50, include_team_news: bool = True, use_nlp_fallback: bool = False,
+                use_nlp_consensus_check: bool = False) -> list[dict]:
     """Every recent NFL headline, tagged and classified -- see this
     module's docstring: informational only, never a direct model input.
 
@@ -179,8 +213,14 @@ def fetch_news(limit: int = 50, include_team_news: bool = True, use_nlp_fallback
     pass across potentially hundreds of scraped headlines would be a
     real time cost for a marginal gain this module doesn't currently
     have evidence justifies -- opt in explicitly if that tradeoff is
-    ever worth it for a specific run."""
-    articles = parse_articles(fetch_raw_news(limit), use_nlp_fallback)
+    ever worth it for a specific run.
+
+    use_nlp_consensus_check (off by default -- see _nlp_disagreement)
+    runs the HF classifier as a second opinion on every ESPN headline the
+    keyword matcher DID classify, flagging disagreements for review;
+    same team-news exclusion and same reasoning as use_nlp_fallback
+    above."""
+    articles = parse_articles(fetch_raw_news(limit), use_nlp_fallback, use_nlp_consensus_check)
     if include_team_news:
         try:
             from data.fetch_firecrawl_sources import fetch_all_team_news
@@ -221,16 +261,32 @@ def cross_check_against_injuries(articles: list[dict], current_injury_status: di
 
 
 def main():
+    import argparse
+
     from config import CURRENT_SEASON
     from data.fetch_injuries import espn_id_to_gsis_id, fetch_current_player_injury_status
 
-    articles = fetch_news()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--nlp-consensus", action="store_true",
+                         help="also run the HF classifier as a second opinion and report disagreements "
+                              "(loads a model -- off by default, same cost tradeoff as use_nlp_fallback)")
+    args = parser.parse_args()
+
+    articles = fetch_news(use_nlp_consensus_check=args.nlp_consensus)
     print(f"Fetched {len(articles)} headlines.")
     actionable = [a for a in articles if a["is_actionable"]]
     print(f"{len(actionable)} classified as injury/lineup/trade-relevant:")
     for a in actionable[:15]:
         teams = ",".join(a["teams"]) or "?"
         print(f"  [{a['category']:8s}] ({teams}) {a['headline']}")
+
+    if args.nlp_consensus:
+        disagreements = [a for a in articles if a.get("nlp_disagreement")]
+        print(f"\n{len(disagreements)} headline(s) where the HF classifier disagreed with the keyword matcher:")
+        for a in disagreements:
+            d = a["nlp_disagreement"]
+            print(f"  keyword={d['keyword_category']!s:10s} nlp={d['nlp_category']!s:10s} "
+                  f"(conf={d['nlp_confidence']:.2f})  {a['headline']}")
 
     injury_status = fetch_current_player_injury_status([CURRENT_SEASON, CURRENT_SEASON - 1])
     espn_to_gsis = espn_id_to_gsis_id([CURRENT_SEASON, CURRENT_SEASON - 1])

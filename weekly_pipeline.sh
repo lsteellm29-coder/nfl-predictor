@@ -1,8 +1,11 @@
 #!/bin/bash
-# Wednesday automation: refresh data, retrain both the win-probability and
-# anytime-TD models, run both calibration audits, validate roster/injury-
-# ID/coverage/headshot data quality, score the current week, and publish
-# the artifact -- in that order, so a retrain always gets audited before
+# Wednesday automation: run the unit test suite (tests/ -- Master Honing
+# Plan, Section D; covers the highest-risk pure-logic functions, cheap
+# enough to run first and fail fast before touching any real data),
+# refresh data, retrain both the win-probability and anytime-TD models,
+# run both calibration audits, validate roster/injury-ID/coverage/
+# headshot data quality, score the current week, and publish the
+# artifact -- in that order, so a retrain always gets audited before
 # its picks get published (Phase 6), and every QA gate from the Player
 # Props QA & Data Integrity spec (plus the Audit Fix Plan's Step 2
 # injury-ID check) runs before anything gets published. The TD ensemble
@@ -40,6 +43,9 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/$(date +%Y%m%d_%H%M%S).log"
 
 {
+  echo "=== $(date) : unit tests (tests/ -- hard-fail on any regression) ==="
+  python -m pytest tests/ -q
+
   echo "=== $(date) : refreshing historical data cache ==="
   python -m data.fetch_historical
 

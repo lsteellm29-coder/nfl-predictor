@@ -6,3 +6,4 @@ pyarrow
 python-dotenv
 xgboost
 scipy
+pytest

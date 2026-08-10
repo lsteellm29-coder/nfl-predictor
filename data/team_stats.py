@@ -71,10 +71,24 @@ def _offense_game_stats(pbp: pd.DataFrame) -> pd.DataFrame:
     )
     rz["red_zone_td_pct"] = rz["rz_tds"] / rz["rz_trips"]
 
+    # Master Honing Plan, Section A (ablation candidate): rate at which
+    # this offense's own dropbacks result in a pressure (nflfastR's own
+    # was_pressure flag, which already folds sacks in as a pressure
+    # outcome) -- the offense's pass-block/pocket-protection signal, as
+    # distinct from off_epa_per_play which blends this in with everything
+    # else that happens on a dropback. was_pressure has ~93-100% coverage
+    # across the 2016-2025 historical window (100% since 2023); restricted
+    # to rows where it's actually populated rather than treating a missing
+    # flag as "no pressure," same as how success/other nflfastR-provided
+    # flags are used elsewhere in this file without a special NaN case.
+    dropbacks = pbp[(pbp["play_type"] == "pass") & pbp["was_pressure"].notna()]
+    pressure_off = dropbacks.groupby(["game_id", "posteam"])["was_pressure"].mean().rename("off_pressure_rate_allowed")
+
     out = epa_ypp.join(third_down[["off_third_down_pct"]], how="outer")
     out = out.join(turnovers, how="outer")
     out = out.join(rz[["red_zone_td_pct"]], how="outer")
     out = out.join(yac_oe, how="outer")
+    out = out.join(pressure_off, how="outer")
     return out.reset_index().rename(columns={"posteam": "team"})
 
 
@@ -111,9 +125,16 @@ def _defense_game_stats(pbp: pd.DataFrame) -> pd.DataFrame:
     )
     turnovers["turnovers_forced"] += fumbles
 
+    # Mirror of off_pressure_rate_allowed above, from the defense's side:
+    # rate at which this defense pressures the opponent's dropbacks --
+    # the pass-rush signal, distinct from def_epa_per_play.
+    dropbacks = pbp[(pbp["play_type"] == "pass") & pbp["was_pressure"].notna()]
+    pressure_def = dropbacks.groupby(["game_id", "defteam"])["was_pressure"].mean().rename("def_pressure_rate")
+
     out = epa_ypp.join(third_down[["def_third_down_pct"]], how="outer")
     out = out.join(turnovers, how="outer")
     out = out.join(def_yac_oe, how="outer")
+    out = out.join(pressure_def, how="outer")
     return out.reset_index().rename(columns={"defteam": "team"})
 
 
@@ -221,6 +242,10 @@ ROLLING_SEASON_COLS = [
     "qb_epa_per_play", "qb_cpoe",
     # Phase 10 (v3 spec): special-teams EPA (field goals, punts, kickoffs).
     "special_teams_epa",
+    # Master Honing Plan, Section A (ablation candidate): pass-rush
+    # pressure rate, both sides (see _offense_game_stats/_defense_game_stats
+    # above for the exact was_pressure-based computation).
+    "off_pressure_rate_allowed", "def_pressure_rate",
 ]
 
 

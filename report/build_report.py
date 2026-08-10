@@ -21,11 +21,15 @@ from report.cards import CARDS_SCRIPT, CARDS_STYLE, espn_headshot_url, game_pick
 from report.logos import get_logo_url
 from report.narrative import phrase_lead_narrative
 from report.news_section import NEWS_STYLE, news_section_html
+from report.alt_lines import ALT_LINES_STYLE, alt_lines_html
 from report.props import props_section_html
 from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE, game_anchor, td_chip_parts
+from report.track_record import TRACK_RECORD_STYLE, track_record_html
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "model", "model.joblib")
+LOG_PATH = os.path.join(os.path.dirname(__file__), "..", "logs", "season_results.csv")
+PROPS_LOG_PATH = os.path.join(os.path.dirname(__file__), "..", "logs", "props_results.csv")
 
 
 def _model_metrics() -> dict:
@@ -137,7 +141,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <style>
 {theme_style}
 {cards_style}
-{news_style}</style>
+{news_style}
+{track_record_style}
+{alt_lines_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -157,6 +163,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   {news_section}
   {days}
+
+  {track_record_section}
 
   <footer>
     Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
@@ -448,6 +456,11 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
     away_td_pct, away_td_name = td_chip_parts(game.get("away_td_scorer"))
     home_td_pct, home_td_name = td_chip_parts(game.get("home_td_scorer"))
 
+    alt_lines_by_game = getattr(props, "attrs", {}).get("alt_lines_by_game", {}) if props is not None else {}
+    alt_lines_for_game = alt_lines_by_game.get((game["home_team"], game["away_team"]))
+    alt_lines_section = alt_lines_html(
+        alt_lines_for_game, kickoff=None, home_team=home_full, away_team=away_full)
+
     return {
         "away_team": game["away_team"],
         "home_team": game["home_team"],
@@ -476,6 +489,7 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
         "game_pick_card": game_pick_card,
         "props_section": props_section_html(
             _game_props(props, game), home_full, away_full, kickoff, _full_name, headshot_url_fn, logo_url_fn),
+        "alt_lines_section": alt_lines_section,
     }
 
 
@@ -528,10 +542,14 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
     # "ensemble" -- only "logistic" actually wants "a", not "an" (same
     # rule build_artifact.py's build() uses for the identical sentence).
     model_type_article = "An" if metrics["model_type"] in ("ensemble", "xgboost") else "A"
+    log_df = pd.read_csv(LOG_PATH) if os.path.exists(LOG_PATH) else pd.DataFrame()
+    props_log_df = pd.read_csv(PROPS_LOG_PATH) if os.path.exists(PROPS_LOG_PATH) else pd.DataFrame()
     return HTML_TEMPLATE.format(
         week=week, season=season, n_games=len(predictions), days="\n".join(days_html),
         theme_style=THEME_STYLE, cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
+        track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_html(log_df, props_log_df),
+        alt_lines_style=ALT_LINES_STYLE,
         # Static branding asset (report/assets/social_preview.png, built
         # once via a one-off Pillow script, not regenerated per-run --
         # nothing in it is week-specific), referenced by its path relative

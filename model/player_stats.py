@@ -264,10 +264,29 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
     # Alternate spreads/totals/team totals (Live News & Expanded Odds
     # spec) travel with the returned frame via .attrs rather than
     # changing this function's return type -- real, multi-book-aggregated
-    # data (data/fetch_props.py's parse_alt_lines), but not yet surfaced
-    # in a UI: this far before kickoff most of it is a single book's
-    # number (see that module's docstring), so there isn't enough real
-    # ladder data yet to build a display around without overstating it.
+    # data (data/fetch_props.py's parse_alt_lines). Re-keyed here from
+    # event_id to (home_team, away_team) -- the key every other per-game
+    # UI lookup in this codebase already uses -- with each game's kickoff
+    # datetime attached, so report/alt_lines.py's display layer can gate
+    # on "how close is this to kickoff" without needing its own copy of
+    # the event_id join. Most rungs run single-book (n_books=1) this far
+    # before kickoff (see parse_alt_lines' docstring) -- report/
+    # alt_lines.py only actually renders a ladder once real multi-book
+    # coverage has filled in, not just whenever this dict is non-empty.
+    alt_lines_by_game = {}
+    for _, g in games.iterrows():
+        event_id = g.get("event_id")
+        if pd.isna(event_id) or event_id not in alt_lines_by_event:
+            continue
+        kickoff_dt = None
+        if pd.notna(g.get("gameday")) and pd.notna(g.get("gametime")):
+            try:
+                kickoff_dt = pd.Timestamp(f"{g['gameday']} {g['gametime']}")
+            except ValueError:
+                kickoff_dt = None
+        alt_lines_by_game[(g["home_team"], g["away_team"])] = {
+            **alt_lines_by_event[event_id], "kickoff": kickoff_dt,
+        }
     market = _pivot_market_props(props) if not props.empty else pd.DataFrame(
         columns=["player", "stat", "line", "market_price", "market_over_prob", "home_team", "away_team"])
 
@@ -458,5 +477,5 @@ def score_props(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
             print(f"  - {entry}")
 
     result = pd.DataFrame(rows)
-    result.attrs["alt_lines_by_event"] = alt_lines_by_event
+    result.attrs["alt_lines_by_game"] = alt_lines_by_game
     return result

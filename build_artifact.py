@@ -29,12 +29,14 @@ from config import CURRENT_SEASON
 from data.fetch_news import fetch_news
 from model.player_stats import score_props
 from model.predict import score_week
+from report.alt_lines import ALT_LINES_STYLE
 from report.build_report import _by_day, _day_header, _model_metrics, _row_data
 from report.cards import CARDS_SCRIPT, CARDS_STYLE, confidence_tier
 from report.logos import THROWBACK_LOGOS, current_logo_urls, get_logo_url
 from report.news_section import NEWS_STYLE, news_section_html
 from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE
-from run_week import get_current_week
+from report.track_record import TRACK_RECORD_STYLE, track_record_html
+from run_week import LOG_PATH, PROPS_LOG_PATH, get_current_week
 
 ASSETS_DIR = os.path.join(ROOT_DIR, "report", "assets")
 OUTPUT_DIR = os.path.join(ROOT_DIR, "report", "output")
@@ -184,7 +186,9 @@ PAGE = """<!DOCTYPE html>
   .wrap {{ padding-bottom: 96px; }}
 }}
 {cards_style}
-{news_style}</style>
+{news_style}
+{track_record_style}
+{alt_lines_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -214,6 +218,8 @@ PAGE = """<!DOCTYPE html>
   <div class="section-head" id="games">Full Breakdown, Game by Game</div>
   {days}
 
+  {track_record_section}
+
   <footer>
     Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
   </footer>
@@ -222,6 +228,7 @@ PAGE = """<!DOCTYPE html>
   <a href="#top">Top</a>
   <a href="#slate" class="is-accent">Slate</a>
   <a href="#games">Games</a>
+  <a href="#track-record">Record</a>
 </nav>
 <script>{cards_script}</script>
 </body>
@@ -249,6 +256,7 @@ HERO_BLOCK = """<div class="hero" id="hero">
 
   <div class="why">{why}</div>
   {props_section}
+  {alt_lines_section}
   <div class="subline" style="margin-top:14px;"><a href="#games" style="color: var(--accent);">Jump to the full slate &#8595;</a></div>
 </div>"""
 
@@ -346,6 +354,16 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     else:
         grid_items_html = "\n".join(grid_items)
 
+    # Master Honing Plan, Section B: the public track record, built from
+    # the same graded logs run_week.py already maintains -- read directly
+    # rather than through run_week.py's own loader functions, since those
+    # also run the (expensive, live-network) grading pass; this section
+    # only ever needs to read what's already been graded and logged, not
+    # trigger a fresh grading pass itself.
+    log_df = pd.read_csv(LOG_PATH) if os.path.exists(LOG_PATH) else pd.DataFrame()
+    props_log_df = pd.read_csv(PROPS_LOG_PATH) if os.path.exists(PROPS_LOG_PATH) else pd.DataFrame()
+    track_record_section = track_record_html(log_df, props_log_df)
+
     metrics = _model_metrics()
     # "xgboost" is read aloud as "ex-gee-boost" (vowel sound) same as
     # "ensemble" -- only "logistic" actually wants "a", not "an".
@@ -355,6 +373,8 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         days="\n".join(days_html), theme_style=THEME_STYLE,
         cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
+        track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_section,
+        alt_lines_style=ALT_LINES_STYLE,
         hero_section=hero_section, grid_items=grid_items_html,
         model_type=metrics["model_type"], model_type_article=model_type_article,
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
