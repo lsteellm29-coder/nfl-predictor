@@ -343,6 +343,67 @@ footer {
 
 THEME_STYLE = _THEME_TEMPLATE.replace("__OSWALD_B64__", OSWALD_B64).replace("__INTER_B64__", INTER_B64)
 
+# Round 2 UX item #15: a print/export-friendly view. Redefining the design
+# tokens inside @media print is enough to re-theme the whole site for paper
+# -- every component in this codebase already reads color through
+# var(--token) (theme.py's own header comment), so nothing here needs a
+# per-component override, just a light, ink-economical palette swapped in
+# at the same custom-property layer everything else already reads from.
+PRINT_STYLE = """
+@media print {
+  @page { margin: 0.6in; }
+
+  :root, :root[data-theme="light"], :root[data-theme="dark"] {
+    --paper: #FFFFFF;
+    --surface: #FFFFFF;
+    --surface-raised: #F4F4F4;
+    --ink: #000000;
+    --muted: #444444;
+    --border: #BBBBBB;
+    --accent: #7A5C00;
+    --accent-soft: #FFFFFF;
+    --positive: #1F6B3D;
+    --positive-soft: #FFFFFF;
+    --negative: #8A2A2A;
+    --negative-soft: #FFFFFF;
+    --warning: #6B5400;
+    --warning-soft: #FFFFFF;
+    --series-2: #33506E;
+    --shadow: none;
+    --shadow-lift: none;
+  }
+  * { box-shadow: none !important; text-shadow: none !important; animation: none !important; transition: none !important; }
+  body { background: #FFFFFF; }
+
+  /* Interactive-only chrome has nothing to do on paper: nothing to click,
+     no hover for a tooltip to answer, no localStorage for a star to read
+     back. Hiding it isn't losing information -- the definitions/values
+     these controls gate are still printed, just not gated. */
+  .bottom-nav, .print-page-btn, .fav-star, .card-share-btn, .filter-bar,
+  .info-icon, .chart-tooltip, .sort-btn, .compare-controls select {
+    display: none !important;
+  }
+
+  /* Every <details> disclosure in this codebase (card-section, card-detail,
+     team-hub, archive week) defaults closed -- exactly the state that's
+     wrong on paper, where there's no click to open one. This overrides
+     the browser's own UA rule that hides a <details>'s body unless
+     [open] is present, so every section prints fully expanded regardless
+     of whatever state a reader last left it in on screen. */
+  details > *:not(summary) { display: block !important; max-height: none !important; }
+  details > summary { list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::after { content: "" !important; }
+
+  /* Keep one game/card/section from splitting across a page boundary
+     where a printer or PDF export would otherwise cut it mid-card. */
+  .game, .pcard, .gcard, .card-section, .compare-slot { break-inside: avoid; }
+
+  a[href^="#"]::after { content: ""; }
+  .wrap { max-width: 100%; padding: 0; }
+}
+"""
+
 
 def game_anchor(game) -> str:
     return f"g-{game['away_team']}-{game['home_team']}"

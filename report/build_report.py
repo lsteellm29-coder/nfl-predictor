@@ -30,7 +30,7 @@ from report.props import props_section_html
 from report.compare import COMPARE_SCRIPT, COMPARE_STYLE, compare_html
 from report.recap import RECAP_STYLE
 from report.team_hub import TEAM_HUB_STYLE, team_hubs_html
-from report.theme import DAY_BLOCK, GAME_BLOCK, THEME_STYLE, game_anchor, td_chip_parts
+from report.theme import DAY_BLOCK, GAME_BLOCK, PRINT_STYLE, THEME_STYLE, game_anchor, td_chip_parts
 from report.track_record import TRACK_RECORD_STYLE, track_record_html
 from data.team_stats import SCHEDULES_PATH, TEAM_STATS_PATH
 from model.td_ensemble import BACKTEST_PATH
@@ -167,7 +167,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 {leaderboard_style}
 {archive_style}
 {team_hub_style}
-{compare_style}</style>
+{compare_style}
+{print_style}</style>
 </head>
 <body>
 <div class="wrap">
@@ -603,7 +604,7 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
 
     return HTML_TEMPLATE.format(
         week=week, season=season, n_games=len(predictions), days="\n".join(days_html),
-        theme_style=THEME_STYLE, cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
+        theme_style=THEME_STYLE, print_style=PRINT_STYLE, cards_style=CARDS_STYLE, cards_script=CARDS_SCRIPT,
         news_style=NEWS_STYLE, news_section=news_section_html(news),
         track_record_style=TRACK_RECORD_STYLE, track_record_section=track_record_html(log_df, props_log_df),
         archive_style=ARCHIVE_STYLE, archive_section=archive_html(log_df),

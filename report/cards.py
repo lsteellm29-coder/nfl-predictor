@@ -89,7 +89,18 @@ CARDS_STYLE = """
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 8px; }
 
 .pcard, .gcard { background: var(--surface, #fff); border: 1px solid var(--border, #E1E4EA); border-radius: 10px;
-  padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  padding: 14px; display: flex; flex-direction: column; gap: 10px; position: relative; }
+.card-share-btn { position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; padding: 0;
+  border: none; border-radius: 6px; background: none; color: var(--muted, #666E7D); cursor: pointer;
+  font-size: 14px; line-height: 26px; text-align: center; }
+.card-share-btn:hover { color: var(--accent, #A8710F); background: var(--paper, #F4F5F8); }
+.card-share-btn:active { transform: scale(0.9); }
+.card-share-btn:focus-visible { outline: 2px solid var(--accent, #A8710F); outline-offset: 1px; }
+
+.print-page-btn { font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 999px; margin-top: 8px;
+  border: 1px solid var(--border, #E1E4EA); background: var(--surface, #fff); color: var(--muted, #666E7D); cursor: pointer; }
+.print-page-btn:hover { color: var(--accent, #A8710F); border-color: var(--accent, #A8710F); }
+.print-page-btn:focus-visible { outline: 2px solid var(--accent, #A8710F); outline-offset: 1px; }
 .pcard-head { display: flex; align-items: center; gap: 10px; }
 /* Headshots are real <img src> fetches against ESPN's CDN (report/build_report.py's
    plain report only -- the Artifact build has no network headshots to wait
@@ -283,6 +294,7 @@ def prop_card_html(row: dict, home_full: str, away_full: str, kickoff: str,
     player_search_key = html.escape(row["player"].lower())
 
     return f"""<div class="pcard" data-team="{row['team']}" data-pos="{row.get('position') or ''}" data-stat="{row['stat']}" data-edge="{edge_sort}" data-player="{player_search_key}">
+  <button type="button" class="card-share-btn" data-share-card aria-label="Download {html.escape(row['player'])}'s pick as an image">&#8681;</button>
   <div class="pcard-head">
     {headshot_html(row['player'], row['team'], row.get('espn_id'), headshot_url_fn, logo_url_fn)}
     <div>
@@ -363,6 +375,7 @@ def game_pick_card_html(game: dict, home_full: str, away_full: str) -> str:
     total_str = f"{total_line:.1f}" if pd.notna(total_line) else "--"
 
     return f"""<div class="gcard">
+  <button type="button" class="card-share-btn" data-share-card aria-label="Download {html.escape(away_full)} at {html.escape(home_full)}'s pick as an image">&#8681;</button>
   <div class="gcard-row">
     <div class="split-side {home_class}"><span class="side-label">{html.escape(home_full)}{(' ' + home_ml) if home_ml else ''}</span>{home_conf}</div>
     <div class="split-side {away_class}"><span class="side-label">{html.escape(away_full)}{(' ' + away_ml) if away_ml else ''}</span>{away_conf}</div>
@@ -410,6 +423,12 @@ function _spSortAndFilterGrid(bar) {
 }
 
 document.addEventListener('click', function (e) {
+  var shareBtn = e.target.closest('[data-share-card]');
+  if (shareBtn) {
+    e.stopPropagation();
+    _spExportCard(shareBtn.closest('.pcard, .gcard'));
+    return;
+  }
   var icon = e.target.closest('.info-icon');
   document.querySelectorAll('.info-tooltip:not([hidden])').forEach(function (t) {
     if (!icon || t.id !== icon.dataset.tooltip) t.hidden = true;
@@ -546,5 +565,204 @@ document.addEventListener('input', function (e) {
       paint(s, idx === -1);
     });
   });
+})();
+
+// Shareable card export (Master Honing Plan round 2, item #8) -- draws a
+// downloadable PNG from whichever pick/prop card was clicked, reading the
+// numbers straight off that card's own rendered DOM (never re-derived, so
+// the exported image can't drift from what the page itself is showing).
+// Always rendered in the brand's dark identity regardless of the page's
+// current light/dark toggle, matching report/assets/social_preview.png --
+// a shared image should look the same no matter who generated it. Plain
+// <canvas>, no library: this codebase's whole client-side footprint is
+// already zero-dependency vanilla JS (sort/filter, chart tooltips,
+// favorites), and a one-off image draw doesn't earn an exception.
+function _spExportCard(cardEl) {
+  if (!cardEl) return;
+  var W = 1080, H = 1080;
+  var canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  var ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  var ink = '#0D0D0D', card = '#1A1A1A', gold = '#D4AF37', cream = '#F2F0E6',
+      muted = '#9C9585', positive = '#4FBE81', negative = '#E0716D', warning = '#E8C547';
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function text(str, x, y, size, color, weight, align, family) {
+    ctx.fillStyle = color;
+    ctx.font = (weight || '400') + ' ' + size + 'px ' + (family || "'Inter', sans-serif");
+    ctx.textAlign = align || 'left';
+    ctx.fillText(str || '', x, y);
+  }
+
+  // Greedy word-wrap, capped at `maxLines` -- a truncated last line gets
+  // an ellipsis rather than silently overflowing the card's edge.
+  function wrapLines(str, maxWidth, size, weight, family, maxLines) {
+    ctx.font = (weight || '400') + ' ' + size + 'px ' + (family || "'Inter', sans-serif");
+    var words = (str || '').split(/\\s+/).filter(Boolean);
+    var lines = [], current = '';
+    for (var i = 0; i < words.length; i++) {
+      var attempt = current ? current + ' ' + words[i] : words[i];
+      if (ctx.measureText(attempt).width > maxWidth && current) {
+        lines.push(current);
+        current = words[i];
+      } else {
+        current = attempt;
+      }
+    }
+    if (current) lines.push(current);
+    if (lines.length > maxLines) {
+      lines = lines.slice(0, maxLines);
+      var last = lines[maxLines - 1];
+      while (ctx.measureText(last + '…').width > maxWidth && last.length > 1) {
+        last = last.slice(0, -1);
+      }
+      lines[maxLines - 1] = last + '…';
+    }
+    return lines;
+  }
+
+  function sideFill(el) {
+    if (el.classList.contains('side-over')) return [positive, ink];
+    if (el.classList.contains('side-under')) return [negative, ink];
+    if (el.classList.contains('side-toss-up')) return [warning, ink];
+    return [card, cream];
+  }
+
+  ctx.fillStyle = ink;
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = gold;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(10, 10, W - 20, H - 20);
+
+  text('SHARPLINE', W / 2, 84, 36, gold, '700', 'center', "'Oswald', sans-serif");
+  text('NFL PREDICTIONS · ACCURACY FIRST', W / 2, 112, 14, muted, '600', 'center');
+
+  var isProp = cardEl.classList.contains('pcard');
+  var y = 210;
+  var sideW = 452, gap = 24, startX = (W - (sideW * 2 + gap)) / 2;
+
+  if (isProp) {
+    var name = (cardEl.querySelector('.pcard-name') || {}).textContent || '';
+    var meta = (cardEl.querySelector('.pcard-meta') || {}).textContent || '';
+    var statLine = (cardEl.querySelector('.pcard-stat') || {}).textContent || '';
+    var matchup = (cardEl.querySelector('.pcard-matchup') || {}).textContent || '';
+
+    text(name, W / 2, y, 50, cream, '700', 'center'); y += 42;
+    text(meta, W / 2, y, 20, muted, '600', 'center'); y += 56;
+    text(statLine, W / 2, y, 26, gold, '700', 'center'); y += 40;
+    wrapLines(matchup, W - 160, 18, '400', null, 1).forEach(function (line) {
+      text(line, W / 2, y, 18, muted, '400', 'center'); y += 26;
+    });
+    y += 30;
+
+    cardEl.querySelectorAll('.split-side').forEach(function (side, i) {
+      var x = startX + i * (sideW + gap);
+      var fill = sideFill(side);
+      var label = (side.querySelector('.side-label') || {}).textContent || '';
+      var conf = (side.querySelector('.side-conf') || {}).textContent || '';
+      ctx.fillStyle = fill[0];
+      roundRect(x, y, sideW, 128, 14);
+      ctx.fill();
+      text(label, x + sideW / 2, y + 58, 30, fill[1], '700', 'center');
+      if (conf) text(conf, x + sideW / 2, y + 92, 17, fill[1], '600', 'center');
+    });
+    y += 128 + 56;
+
+    var vsRow = cardEl.querySelector('.vs-row');
+    if (vsRow) {
+      var parts = Array.from(vsRow.querySelectorAll('span')).map(function (s) {
+        return s.textContent.replace(/\\s+/g, ' ').trim();
+      });
+      text(parts.join('          '), W / 2, y, 19, muted, '500', 'center');
+    }
+  } else {
+    y = 260;
+    var sides = cardEl.querySelectorAll('.gcard-row .split-side');
+    sides.forEach(function (side, i) {
+      var x = startX + i * (sideW + gap);
+      var fill = sideFill(side);
+      var label = (side.querySelector('.side-label') || {}).textContent || '';
+      var conf = (side.querySelector('.side-conf') || {}).textContent || '';
+      ctx.fillStyle = fill[0];
+      roundRect(x, y, sideW, 190, 16);
+      ctx.fill();
+      var lines = wrapLines(label, sideW - 40, 27, '700', null, 2);
+      var ly = y + (lines.length === 1 ? 90 : 74);
+      lines.forEach(function (line) {
+        text(line, x + sideW / 2, ly, 27, fill[1], '700', 'center');
+        ly += 34;
+      });
+      if (conf) text(conf, x + sideW / 2, y + 155, 19, fill[1], '600', 'center');
+    });
+    y += 190 + 50;
+
+    var edgeRow = cardEl.querySelector('.vs-row');
+    if (edgeRow) {
+      var edgeParts = Array.from(edgeRow.querySelectorAll('span')).map(function (s) {
+        return s.textContent.replace(/\\s+/g, ' ').trim();
+      });
+      text(edgeParts.join('   '), W / 2, y, 20, gold, '600', 'center');
+      y += 40;
+    }
+
+    var matchupLine = (cardEl.querySelector('.pcard-matchup') || {}).textContent || '';
+    wrapLines(matchupLine, W - 160, 18, '400', null, 2).forEach(function (line) {
+      text(line, W / 2, y, 18, muted, '400', 'center');
+      y += 26;
+    });
+  }
+
+  text('Informed estimates, not guarantees — no betting advice', W / 2, H - 44, 15, muted, '500', 'center');
+
+  var download = function (url) {
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'sharpline-pick.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+  if (canvas.toBlob) {
+    canvas.toBlob(function (blob) {
+      if (!blob) return;
+      var url = URL.createObjectURL(blob);
+      download(url);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    });
+  } else {
+    download(canvas.toDataURL('image/png'));
+  }
+}
+
+// Print/export-friendly weekly view (Master Honing Plan round 2, item
+// #15) -- the CSS (report/theme.py's PRINT_STYLE) already re-themes and
+// re-flows the page for @media print on its own; this just adds a
+// same-shaped discoverable "Print / Save as PDF" trigger next to the
+// wordmark, injected at runtime rather than duplicated into both page
+// templates (build_artifact.py's PAGE and report/build_report.py's
+// HTML_TEMPLATE both render the same .masthead div, so one selector
+// reaches both outputs from this one shared script).
+(function () {
+  var masthead = document.querySelector('.masthead');
+  if (!masthead) return;
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'print-page-btn';
+  btn.textContent = 'Print / Save as PDF';
+  btn.setAttribute('aria-label', 'Print this page or save it as a PDF');
+  btn.addEventListener('click', function () { window.print(); });
+  masthead.appendChild(btn);
 })();
 """
