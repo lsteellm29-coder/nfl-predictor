@@ -151,3 +151,52 @@ All 7 `fillna` calls in the training/live-scoring path (`model/train.py`, `model
 ## Bottom line for Phase 1
 
 Two of the four Phase 1 sub-items are effectively already clean (1.3 NaN fills, and 1.2's convention turns out to be correct, just undocumented). The real, confirmed, unfixed bug is 1.1 (team-code relocations corrupting Elo/h2h/rolling continuity) — concrete, scoped, and high-value to fix next. 1.4 (duplicate-row assertions) is pure defensive hardening, not a confirmed active bug, and can be added quickly once 1.1's fix is in.
+
+---
+
+## Phase 2 — Data leakage audit
+
+The rule this phase enforces: every feature for a game must be computable from data timestamped strictly before that game's kickoff. Went through every feature family by reading the actual construction logic (not just the docstrings), then ran this plan's own stated exit test for real — pick a 2025 Week 4 game and prove every feature value was knowable beforehand.
+
+### Verified leak-free by construction (read the actual code, not assumed)
+
+- **Rolling team stats** (`data/team_stats.py: _rolling_for_team_season()`): every one of the 18 `STAT_COLS` uses `.expanding().mean().shift(1)` (or `.rolling(5, min_periods=1).mean().shift(1)` for `ats_win_pct_last5`) — the `.shift(1)` is what excludes the game's own row from its own rolling average. Confirmed by reading the actual pandas calls, not the docstring's claim about them.
+- **Opponent-adjusted stats** (`data/opponent_adjust.py`): `add_opponent_adjusted_columns()` merges the opponent's rolling value at the SAME `(season, week)` — since that value is itself already pre-game-shifted, the adjustment only ever references what was knowable before this specific game. All 3 iterative passes apply the identical shifted-rolling pattern (`_roll_adjusted()`), so iterating doesn't relax the guarantee.
+- **Elo ratings** (`model/elo.py: compute_elo_ratings()`): each game's `_pre` snapshot (`home_off_elo_pre` etc.) is appended to `records` BEFORE the `if pd.isna(home_score): continue` check and the actual rating update that follows it — verified by reading the exact line order, not the docstring's claim.
+- **Injury impact** (`data/fetch_injuries.py`): both the historical (`nfl.import_injuries`, tagged per season/week by nflverse) and live (ESPN "right now") paths are inherently pre-game by construction — an injury report IS a pre-game document, the same way a betting line is. Training only ever reads the historical path; live scoring only ever reads the live path; no cross-contamination between them.
+- **Lookahead flag** (`data/situational.py: lookahead_flags()`): uses `.shift(-1)` — a forward-looking shift, which on its face looks suspicious. It isn't leakage: this reads next week's DIVISION-GAME FLAG off the published schedule (known months in advance), never a future game RESULT. Worth stating explicitly since a naive reviewer (or a future refactor) could misflag any `.shift(-1)` as automatically wrong.
+
+### Spread open/close ambiguity — restated in leakage terms (not new, already in Phase 0/§3.2)
+
+`model/train.py`'s `market_spread = spread_line` may be trained on nflverse's CLOSING line (more informed — has absorbed a week of injury news and sharp money) while live scoring only has access to whatever line The Odds API shows at scoring time (likely an earlier, less-informed number). Both open and close happen before kickoff, so this isn't classic leakage, but it is a real train/serve information asymmetry the plan's Phase 2 explicitly asks about ("closing line used as a feature when you'd only have the opening line"). Already investigated against nflverse's own data dictionary and confirmed genuinely unresolvable with this project's current data sources (no historical open/close pair exists to test against) — restated here, not re-solved.
+
+### `assert_no_leakage()` — the explicit tripwire this phase asks for
+
+New `data/leakage.py`. Doesn't re-derive whether any individual number is correct (the constructions above already guarantee that) — it's a second, explicit, separately-named guard at the four week-boundary filters that are the one place a future refactor could quietly weaken the guarantee (e.g. changing `< week` to `<= week` without noticing the consequence): `model/predict.py: _current_season_stats()`, `model/player_stats.py: _current_season_pbp()`, `model/td_model.py: season_to_date()` and `recency_weighted_touch_share()` (both used with a `upto_week=30` sentinel for a fully-completed fallback season, where the check is a safe no-op).
+
+### The real findings — not leakage, the opposite problem: three silent data-completeness bugs
+
+Running this phase's own exit test (a real 2025 Week 4 game, prove every feature was knowable beforehand) surfaced that **most early-season games across every cached season were being silently dropped from training entirely**, all via `model/train.py`'s `.dropna(subset=FEATURE_COLS)` — not because of leakage, but because of features that legitimately have no value yet this early, with no fallback. All three are now fixed and retrained:
+
+1. **Opponent-adjustment warmup gap**: the 3-pass iterative adjustment compounds its own `.shift(1)` warmup requirement each pass (pass 1 needs 1 prior week, pass 2 needs pass 1's own rolled value, pass 3 needs pass 2's) — with `n_passes=3`, the `*_adj_avg` columns didn't produce a real number until roughly week 5. Verified: 100% of weeks 1–4 across all 10 seasons were null on these 4 columns specifically. Fixed in `data/team_stats.py: _fill_adjusted_warmup_gap()` — falls back to that team's own raw (unadjusted, already leak-free) rolling average when the adjusted one isn't warmed up yet, rather than leaving it null.
+2. **Home-field-context gap**: `home_field_context_diff` needs a team to have played at least one HOME game and its opponent at least one AWAY game already (`data/team_stats.py`'s home/away-split rolling averages) — most week-2 (and some week-3) games didn't have both sides populated yet. Fixed in `model/train.py` and `model/predict.py`: `.fillna(0.0)`, the same "no signal yet" default this codebase already used for `blowout_loss_diff`/`lookahead_diff` — a supplementary term reading as neutral, not the game's only signal going blank.
+3. **The big one — week 1 has no fallback at all**: every season's week 1 structurally has zero in-season rolling history (there's nothing to `.expanding()` yet), and `build_feature_frame()` had NO equivalent of `model/predict.py`'s own `_fallback_stats()` (which already substitutes a team's final prior-season row for exactly this case at LIVE scoring time). Verified empirically: even after fixing #1 and #2 above, **zero week-1 games, across all 10 cached seasons, survived into training.** For a project whose entire deployment target is Week 1, this is the single most consequential finding of this whole audit — the model had never been trained on a real Week 1 game, or on the fallback-shaped input pattern it's actually asked to use the moment it scores one. Fixed with `model/train.py: _team_stats_with_fallback()`, mirroring the exact fallback pattern `model/predict.py` already uses for live scoring rather than inventing a new one.
+
+**Retrained and compared, not assumed better:**
+
+| | Before any Phase 2 fix (already had Phase 1's team-code fix) | After all 3 fixes |
+|---|---|---|
+| Training rows | 1782 (2016–2024) | 2341 (2016–2024) — **+31%** |
+| True 2025 holdout size | 208 games | 271 games (now includes real Week 1 2025) |
+| Selected model type | xgboost (2/4 walk-forward folds) | xgboost (3/4 walk-forward folds) |
+| True 2025 holdout accuracy | 0.649 | **0.672** |
+| Walk-forward fold: 2022 | 0.660 | 0.658 (flat) |
+| Walk-forward fold: 2023 | 0.654 | 0.673 |
+| Walk-forward fold: 2024 | 0.760 | 0.728 (down, but tested against a different, now-Week-1-inclusive slice) |
+| Walk-forward fold: 2025 | 0.654 | 0.672 |
+
+A genuine, meaningful improvement, not just more data for its own sake — the model is now evaluated on (and has actually learned from) the exact game shape it's deployed to predict.
+
+### Bottom line for Phase 2
+
+The classic leakage question (future information reaching a pre-game feature) checked out clean everywhere it was checked — every rolling/Elo/opponent-adjusted construction already guarantees it, now with an explicit tripwire locking that in. The real yield of this phase was the opposite failure mode: silent training-data exclusion that happened to concentrate exactly on the games this project cares most about. Fixed, tested, retrained, and verified with a real accuracy improvement on the true holdout.

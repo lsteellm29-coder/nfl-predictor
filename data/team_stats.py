@@ -10,7 +10,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from data.opponent_adjust import iterative_opponent_adjust
+from data.opponent_adjust import OPPONENT_STAT, iterative_opponent_adjust
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 SCHEDULES_PATH = os.path.join(CACHE_DIR, "schedules.parquet")
@@ -296,7 +296,39 @@ def build_rolling_team_stats(team_game_stats: pd.DataFrame) -> pd.DataFrame:
     # see data/opponent_adjust.py's docstring.
     adj_rolling = iterative_opponent_adjust(team_game_stats, result)
     result = result.merge(adj_rolling, on=["season", "week", "team"], how="left")
+    result = _fill_adjusted_warmup_gap(result)
 
+    return result
+
+
+def _fill_adjusted_warmup_gap(result: pd.DataFrame) -> pd.DataFrame:
+    """Week 1 Audit & Tuning Plan Phase 2 (found doing the leakage exit
+    test, not leakage itself -- the opposite problem): each of the 3
+    iterative opponent-adjustment passes adds its OWN
+    expanding().shift(1) "warmup" requirement on top of the raw stat's
+    own (data/opponent_adjust.py's roll_opponent_adjusted(), called once
+    per pass) -- pass 1 needs 1 prior week, pass 2 needs pass 1's own
+    rolled value, pass 3 needs pass 2's, so with n_passes=3 the
+    *_adj_avg columns don't produce a real number until roughly week 5
+    of a season. Verified empirically: every week 1-4 game across all 10
+    cached seasons (about 24% of all training rows) was silently dropped
+    by model/train.py's `.dropna(subset=FEATURE_COLS)`, meaning the
+    model has never trained on a single real Week 1 game -- for a
+    project whose entire deployment target is Week 1, that's the single
+    most consequential finding of this audit.
+
+    Fix: when the adjusted value isn't warmed up yet, fall back to that
+    same team's own RAW rolling average for that stat/week rather than
+    leaving it null -- not a fabricated number, the team's own already-
+    computed, already-leak-free raw figure, just not yet opponent-
+    refined. This is strictly better than dropping the row: an early-
+    season game trains on a slightly less-refined version of a real
+    signal instead of not existing in the training set at all."""
+    result = result.copy()
+    for stat_col in OPPONENT_STAT:
+        adj_col = f"{stat_col}_adj_avg"
+        raw_col = f"{stat_col}_avg"
+        result[adj_col] = result[adj_col].fillna(result[raw_col])
     return result
 
 

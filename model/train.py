@@ -136,6 +136,64 @@ def _assert_no_join_fanout(before_n: int, after_df: pd.DataFrame, step: str, key
         )
 
 
+# Every rolling-stat column in team_stats.parquet EXCEPT games_played --
+# that one isn't a model feature (not in ROLLING_SEASON_COLS/STAT_COLS/
+# FEATURE_COLS) and has different semantics ("games played so far THIS
+# season's rolling window", which should genuinely read 0 at week 1, not
+# borrow a large number from last season).
+_TEAM_STATS_ID_COLS = ["season", "week", "team", "opponent", "is_home", "rest_days", "div_game", "games_played"]
+
+
+def _team_stats_with_fallback(team_stats: pd.DataFrame) -> pd.DataFrame:
+    """Week 1 Audit & Tuning Plan Phase 2 -- the single most consequential
+    finding of this audit: every season's week 1 has NO in-season rolling
+    history by construction (data/team_stats.py's expanding().shift(1)
+    necessarily produces NaN for a team's very first row of a season),
+    and build_feature_frame() had no fallback for that -- unlike
+    model/predict.py's get_pregame_stats()/_fallback_stats(), which
+    already substitutes a team's final PRIOR-season row for exactly this
+    case at LIVE scoring time. Verified empirically: even after fixing
+    the opponent-adjustment warmup gap and the home-field-context gap
+    (both earlier in this file), literally zero week-1 games survived
+    training, across all 10 cached seasons -- meaning the model had never
+    been trained on a single real Week 1 game, AND had never seen the
+    fallback-shaped input pattern at all, despite that being exactly what
+    it's asked to use the moment it's deployed to score an actual Week 1.
+
+    Fix: mirrors model/predict.py's existing fallback pattern instead of
+    inventing a new one -- fills each individual stat column's null
+    values (structurally, that's every column at week 1 -- EXCEPT
+    ats_win_pct_last5, which data/team_stats.py deliberately computes
+    grouped by team alone, not team+season, so it already legitimately
+    bridges the season boundary on its own and is real at week 1; a
+    naive "is this WHOLE row null" check missed that and skipped every
+    week-1 row entirely, caught empirically re-running this exact
+    verification) with that same team's final value from the
+    immediately prior season, one column at a time so an already-real
+    column (ats_win_pct_last5, or any other) is never touched. A team
+    with no prior-season row at all (the very first cached season, 2016,
+    has no 2015 to fall back to) simply stays null for that column, and
+    that row is still dropped by build_feature_frame()'s own dropna --
+    an honest data limit, not something to guess around."""
+    stat_cols = [c for c in team_stats.columns if c not in _TEAM_STATS_ID_COLS]
+
+    # Each team's own final row of season S, relabeled as season S+1's
+    # fallback -- the same "last row of the prior season" model/predict.py's
+    # _fallback_stats() already uses, just precomputed for every season
+    # transition in the cache instead of only the live current one.
+    prior_final = (
+        team_stats.sort_values("week").groupby(["team", "season"]).tail(1)
+        [["team", "season"] + stat_cols]
+        .rename(columns={c: f"{c}_fallback" for c in stat_cols})
+    )
+    prior_final = prior_final.assign(season=prior_final["season"] + 1)
+
+    result = team_stats.merge(prior_final, on=["team", "season"], how="left")
+    for c in stat_cols:
+        result[c] = result[c].fillna(result[f"{c}_fallback"])
+    return result.drop(columns=[f"{c}_fallback" for c in stat_cols])
+
+
 def build_feature_frame(
     schedules: pd.DataFrame, team_stats: pd.DataFrame, injuries: pd.DataFrame,
     elo_per_game: pd.DataFrame, blowouts: pd.DataFrame, lookaheads: pd.DataFrame,
@@ -147,6 +205,7 @@ def build_feature_frame(
     reg = reg[reg["home_score"] != reg["away_score"]]  # drop ties (ambiguous label)
     reg_n = len(reg)
 
+    team_stats = _team_stats_with_fallback(team_stats)
     home = team_stats[team_stats["is_home"]]
     away = team_stats[~team_stats["is_home"]]
 
@@ -172,6 +231,23 @@ def build_feature_frame(
     # actually get a crowd/travel advantage, so this feature shouldn't
     # credit them with one (Phase 9 addition, v3 spec).
     games.loc[games["location"] == "Neutral", "home_field_context_diff"] = 0.0
+    # Week 1 Audit & Tuning Plan Phase 2: home_point_diff_avg/
+    # away_point_diff_avg (data/team_stats.py's _rolling_for_team_season())
+    # each need that team to have played at least one game ON THAT SIDE
+    # already -- a team whose season so far is all road games has no
+    # "home" figure yet even after 2-3 real games, and vice versa. Found
+    # doing this plan's own leakage exit test: this alone was silently
+    # dropping most week-2 (and some week-3) training rows via
+    # `.dropna(subset=FEATURE_COLS)` below, even after fixing the
+    # opponent-adjustment warmup gap (data/team_stats.py's
+    # _fill_adjusted_warmup_gap()) that motivated the exit test in the
+    # first place. Same "no signal yet" default this codebase already
+    # uses for blowout_loss_diff/lookahead_diff below (0, not a guessed
+    # average) -- the model still has every other correctly-computed
+    # rolling/Elo/market feature for this game either way, this is one
+    # supplementary term reading as neutral when it can't be computed yet,
+    # not the game's only signal going blank.
+    games["home_field_context_diff"] = games["home_field_context_diff"].fillna(0.0)
     games["rest_diff"] = games["rest_days_home"] - games["rest_days_away"]
 
     # Left merge + fillna(0): a team with no rows in `injuries` that week

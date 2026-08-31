@@ -22,6 +22,7 @@ from config import CURRENT_SEASON
 from data.fetch_injuries import fetch_current_injury_impact
 from data.fetch_week import fetch_week
 from data.fetch_weather import fetch_forecast
+from data.leakage import assert_no_leakage
 from data.player_trends import qb_game_log, qb_streak, rb_game_log, rb_streak
 from data.positional_matchups import build_position_tables, game_mismatches, position_map
 from data.rosters import fetch_rosters
@@ -69,6 +70,13 @@ def _current_season_stats(season: int, week: int) -> pd.DataFrame:
     team_game_stats = build_team_game_stats(schedule, pbp)
     rolling = build_rolling_team_stats(team_game_stats)
     rolling = rolling[rolling["week"] < week]
+    # Phase 2 leakage tripwire: this filter IS the actual enforcement
+    # boundary for current-season rolling stats -- a separate, explicit
+    # assertion right after it (rather than trusting the filter
+    # expression alone) means a future refactor that accidentally
+    # loosens it to `<=` fails loudly here instead of quietly training
+    # on a team's own game.
+    assert_no_leakage(rolling, week, context="_current_season_stats")
     return rolling.sort_values("week").groupby("team").tail(1)
 
 
@@ -313,7 +321,15 @@ def _build_features(
     if game.get("location") == "Neutral":
         feat["home_field_context_diff"] = 0.0
     else:
-        feat["home_field_context_diff"] = h["home_point_diff_avg"] - a["away_point_diff_avg"]
+        # Week 1 Audit & Tuning Plan Phase 2: same fillna(0.0) as
+        # model/train.py's build_feature_frame() -- a team with no home
+        # (or no away) game yet this season has no real figure for one
+        # side of this diff, which would otherwise reach the model as a
+        # raw NaN and either error out or silently corrupt a live
+        # prediction, not just drop a training row the way it does at
+        # training time.
+        home_context = h["home_point_diff_avg"] - a["away_point_diff_avg"]
+        feat["home_field_context_diff"] = 0.0 if pd.isna(home_context) else home_context
     feat["rest_diff"] = game["home_rest"] - game["away_rest"]
     # A team with no key absent from the live injury feed just had nothing
     # worth listing -- 0 impact, not missing data.

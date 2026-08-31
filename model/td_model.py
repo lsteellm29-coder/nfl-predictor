@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import poisson
 
+from data.leakage import assert_no_leakage
 from model.td_ensemble import blend_with_classifier
 
 RED_ZONE_YARDLINE = 20
@@ -169,6 +170,12 @@ def season_to_date(game_log: pd.DataFrame, group_cols: list, value_cols: list, u
     team's red-zone trip rate doesn't need per-game recency weighting the
     way an individual player's role does)."""
     prior = game_log[game_log["week"] < upto_week]
+    # Phase 2 leakage tripwire: harmless no-op for a fully-completed
+    # fallback season (upto_week=30, a deliberate sentinel meaning
+    # "everything," and no real season has a week 30 to trip it), but a
+    # real, enforced check for the live current-season case, where
+    # upto_week is a genuine target week.
+    assert_no_leakage(prior, upto_week, context="season_to_date")
     if prior.empty:
         return pd.DataFrame(columns=group_cols + value_cols + ["games"])
     games = prior.groupby(group_cols).size().rename("games")
@@ -200,6 +207,11 @@ def recency_weighted_touch_share(touch_log: pd.DataFrame, upto_week: int,
     window = RECENCY_WINDOW if window is None else window
     multiplier = RECENCY_WEIGHT_MULTIPLIER if multiplier is None else multiplier
     prior = touch_log[touch_log["week"] < upto_week].copy()
+    # Phase 2 leakage tripwire -- see season_to_date()'s identical check
+    # just above for why this is a safe no-op for a complete fallback
+    # season (upto_week=30) and a real enforced boundary for the live
+    # current-season case.
+    assert_no_leakage(prior, upto_week, context="recency_weighted_touch_share")
     if prior.empty:
         return pd.DataFrame(columns=["team", "player_id", "w_rz_touches", "w_rz_tds", "w_gl_touches", "n_games"])
 
