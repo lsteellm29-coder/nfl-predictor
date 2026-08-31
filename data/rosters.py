@@ -28,23 +28,20 @@ sweep):
    against the schedule's "ARI" -- so "AZ" matched nothing, and nearly
    all 91 real players on Arizona's current roster silently vanished
    from anything that filters by team, not just the two who happened to
-   still carry a stale "ARI" fallback row. TEAM_CODE_ALIASES below
-   closes that gap by normalizing to the code every OTHER dataset
-   already uses, so a roster-sourced team code is always safe to compare
-   against a schedule-sourced one.
+   still carry a stale "ARI" fallback row. data/team_codes.py's
+   TEAM_CODE_ALIASES (this module's AZ->ARI entry moved there, Week 1
+   Audit & Tuning Plan Phase 1.1 -- consolidated into one canonical map
+   shared with the historical OAK/SD/STL relocations, rather than two
+   separate alias dicts that could drift apart) closes that gap by
+   normalizing to the code every OTHER dataset already uses, so a
+   roster-sourced team code is always safe to compare against a
+   schedule-sourced one.
 """
 
 import nfl_data_py as nfl
 import pandas as pd
 
-# nfl_data_py source -> the code every other dataset in this codebase
-# uses (schedules, team_stats.parquet, td_backtest.parquet, config.py,
-# report/logos.py). Add to this if another season/source-specific
-# rename ever surfaces the same way Arizona's did for 2026 -- the fix is
-# always "make the roster-sourced code match what schedules already
-# use," never the other direction, since schedules/game data is this
-# codebase's actual join key for "which game/team is this."
-TEAM_CODE_ALIASES = {"AZ": "ARI"}
+from data.team_codes import normalize_team_codes
 
 
 def fetch_rosters(seasons: list[int]) -> pd.DataFrame:
@@ -52,11 +49,11 @@ def fetch_rosters(seasons: list[int]) -> pd.DataFrame:
     duplicate player_id, not whichever happens to be listed/returned
     first. Drops the small number of rows nfl_data_py returns with no
     player_id at all (practice-squad/tryout entries this codebase can't
-    key anything to). `team` is canonicalized via TEAM_CODE_ALIASES
-    before returning -- always safe to compare against a schedule's
-    home_team/away_team without a separate translation step."""
+    key anything to). `team` is canonicalized via data/team_codes.py's
+    normalize_team_codes() before returning -- always safe to compare
+    against a schedule's home_team/away_team without a separate
+    translation step."""
     rosters = nfl.import_seasonal_rosters(seasons)
     rosters = rosters[rosters["player_id"] != ""]
-    rosters = rosters.copy()
-    rosters["team"] = rosters["team"].replace(TEAM_CODE_ALIASES)
+    rosters = normalize_team_codes(rosters, columns=["team"])
     return rosters.sort_values("season", ascending=False).drop_duplicates("player_id", keep="first")

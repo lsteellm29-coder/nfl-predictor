@@ -29,6 +29,7 @@ import nfl_data_py as nfl
 import pandas as pd
 
 from data.rosters import fetch_rosters
+from data.team_codes import normalize_team_codes
 
 # Same usage definition as model/predict.py's MEANINGFUL_SNAP_PCT/
 # MEANINGFUL_MIN_GAMES (kept as separate constants, not a cross-import,
@@ -101,9 +102,17 @@ def head_coach_changes(season: int) -> dict[str, dict]:
     """team -> {"prior_coach", "current_coach"} for every team whose
     head coach differs from last season's final one. A team with no
     coach listed in either season (a real, if rare, data gap) is simply
-    absent rather than guessed at."""
-    prior = _team_coach_map(nfl.import_schedules([season - 1]))
-    current = _team_coach_map(nfl.import_schedules([season]))
+    absent rather than guessed at.
+
+    Week 1 Audit & Tuning Plan Phase 1.1: these are two independent live
+    fetches, one season apart, so they don't go through
+    data/fetch_historical.py's cache (already normalized there) --
+    normalizing here directly is what keeps a real relocation (e.g.
+    Raiders OAK->LV in 2020) from making this function think every team
+    in the league got a new head coach that year, purely because the
+    two seasons' team-code strings didn't match."""
+    prior = _team_coach_map(normalize_team_codes(nfl.import_schedules([season - 1])))
+    current = _team_coach_map(normalize_team_codes(nfl.import_schedules([season])))
     return {
         team: {"prior_coach": prior[team], "current_coach": coach}
         for team, coach in current.items()
@@ -116,7 +125,7 @@ def _snap_share_by_player(season: int) -> pd.DataFrame:
     offense-or-defense snap share and games played, `season`'s REG-
     season games only. Empty if snap counts aren't available yet for
     this season (e.g. it hasn't started)."""
-    snaps = nfl.import_snap_counts([season])
+    snaps = normalize_team_codes(nfl.import_snap_counts([season]))
     snaps = snaps[snaps["game_type"] == "REG"]
     if snaps.empty:
         return pd.DataFrame(columns=["team", "player", "position", "mean", "size"])

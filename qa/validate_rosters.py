@@ -14,7 +14,8 @@ import pandas as pd
 
 from config import CURRENT_SEASON
 from data.fetch_balldontlie import fetch_all_players
-from data.rosters import TEAM_CODE_ALIASES, fetch_rosters
+from data.rosters import fetch_rosters
+from data.team_codes import TEAM_CODE_ALIASES
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "cache")
 SNAPSHOT_PATH = os.path.join(CACHE_DIR, "roster_snapshot.parquet")

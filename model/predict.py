@@ -31,6 +31,7 @@ from data.situational import (
 from data.team_change_tracker import (
     head_coach_changes, team_change_confidence_flag, team_unit_turnover,
 )
+from data.team_codes import normalize_team_codes
 from data.team_history import coach_h2h, team_last_n_meetings
 from data.team_stats import build_rolling_team_stats, build_team_game_stats
 from model.calibration import apply_calibrator
@@ -120,8 +121,12 @@ def _meaningful_usage_players(season: int) -> dict[str, set[str]]:
     import_snap_counts() (Pro-Football-Reference sourced). Snap share is
     a direct usage measurement, not a proxy reconstructed from touches/
     targets -- the actual "starter vs. depth chart" signal the spec asks
-    for, not an approximation of it."""
-    snaps = nfl.import_snap_counts([season])
+    for, not an approximation of it. Team codes normalized (data/
+    team_codes.py) since this gets compared against fetch_rosters()'s
+    already-canonicalized codes in team_roster_turnover() below -- see
+    that module's docstring for the real bug an unnormalized comparison
+    like this one caused before it existed."""
+    snaps = normalize_team_codes(nfl.import_snap_counts([season]))
     snaps = snaps[snaps["game_type"] == "REG"]
     if snaps.empty:
         return {}

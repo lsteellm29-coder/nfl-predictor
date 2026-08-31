@@ -115,6 +115,27 @@ FEATURE_COLS = [f"{c}_diff" for c in STAT_COLS] + [
 ]
 
 
+def _assert_no_join_fanout(before_n: int, after_df: pd.DataFrame, step: str, key: str = "game_id") -> None:
+    """Week 1 Audit & Tuning Plan Phase 1.4: a many-to-many merge silently
+    inflates row count and double-weights whatever got duplicated onto.
+    Every merge in build_feature_frame() joins onto a (season, week,
+    team) key that should be unique on the right-hand side, so an inner/
+    left join can only ever DROP rows that don't match, never multiply
+    them -- unless the right side itself has a duplicate key, which is
+    exactly the bug this catches. Prints row counts either way, same as
+    the plan's own paste-prompt asks for, and fails loudly (with the
+    actual duplicated key values, not just a count) rather than letting
+    a fanned-out join silently train on double-weighted games."""
+    after_n = len(after_df)
+    print(f"  [{step}] rows before: {before_n}, after: {after_n}")
+    if after_n > before_n:
+        dupes = after_df[key][after_df[key].duplicated()].unique()
+        raise AssertionError(
+            f"{step}: row count grew from {before_n} to {after_n} -- a merge fanned out "
+            f"(the right-hand side had a duplicate join key). Duplicated {key}(s): {list(dupes)[:10]}"
+        )
+
+
 def build_feature_frame(
     schedules: pd.DataFrame, team_stats: pd.DataFrame, injuries: pd.DataFrame,
     elo_per_game: pd.DataFrame, blowouts: pd.DataFrame, lookaheads: pd.DataFrame,
@@ -124,6 +145,7 @@ def build_feature_frame(
         (schedules["game_type"] == "REG") & schedules["home_score"].notna()
     ].copy()
     reg = reg[reg["home_score"] != reg["away_score"]]  # drop ties (ambiguous label)
+    reg_n = len(reg)
 
     home = team_stats[team_stats["is_home"]]
     away = team_stats[~team_stats["is_home"]]
@@ -131,11 +153,14 @@ def build_feature_frame(
     games = reg.merge(
         home, left_on=["season", "week", "home_team"],
         right_on=["season", "week", "team"], how="inner",
-    ).merge(
+    )
+    _assert_no_join_fanout(reg_n, games, "home team-stats merge")
+    games = games.merge(
         away, left_on=["season", "week", "away_team"],
         right_on=["season", "week", "team"], how="inner",
         suffixes=("_home", "_away"),
     )
+    _assert_no_join_fanout(reg_n, games, "away team-stats merge")
 
     for col in STAT_COLS:
         games[f"{col}_diff"] = games[f"{col}_home"] - games[f"{col}_away"]
@@ -159,6 +184,7 @@ def build_feature_frame(
         injuries.rename(columns={"team": "away_team", "injury_impact": "away_injury_impact"}),
         on=["season", "week", "away_team"], how="left",
     )
+    _assert_no_join_fanout(reg_n, games, "injury impact merge")
     games["home_injury_impact"] = games["home_injury_impact"].fillna(0.0)
     games["away_injury_impact"] = games["away_injury_impact"].fillna(0.0)
     games["injury_impact_diff"] = games["home_injury_impact"] - games["away_injury_impact"]
@@ -168,6 +194,7 @@ def build_feature_frame(
                       "away_off_elo_pre", "away_def_elo_pre"]],
         on="game_id", how="left",
     )
+    _assert_no_join_fanout(reg_n, games, "Elo merge")
     # Home offense vs. away defense, and away offense vs. home defense,
     # kept as two separate features rather than one blended rating -- see
     # model/elo.py's docstring for why the split matters.
@@ -216,6 +243,7 @@ def build_feature_frame(
         blowouts.rename(columns={"team": "away_team", "blowout_loss_last_game": "away_blowout_loss"}),
         on=["season", "week", "away_team"], how="left",
     )
+    _assert_no_join_fanout(reg_n, games, "blowout-loss flag merge")
     games["blowout_loss_diff"] = games["home_blowout_loss"].fillna(0) - games["away_blowout_loss"].fillna(0)
 
     games = games.merge(
@@ -225,6 +253,7 @@ def build_feature_frame(
         lookaheads.rename(columns={"team": "away_team", "lookahead_spot": "away_lookahead"}),
         on=["season", "week", "away_team"], how="left",
     )
+    _assert_no_join_fanout(reg_n, games, "lookahead flag merge")
     games["lookahead_diff"] = games["home_lookahead"].fillna(0) - games["away_lookahead"].fillna(0)
 
     games["home_win"] = (games["home_score"] > games["away_score"]).astype(int)
