@@ -58,3 +58,35 @@ The more likely real explanation: a binary "did the QB change" flag can't distin
 The one significant result (`coaching_change_diff`, −4.60, CI doesn't cross zero) needs its own caveat before being trusted at face value: teams that fire their head coach mid-cycle tend to already have been struggling — a coaching change is as much a *symptom* of a bad team as a cause of one. A simple ridge fit on raw margin can't separate "the new coach made them worse" from "they were already the kind of team that fires its coach," so this coefficient is more honestly read as "a team with a coaching change this season tends to underperform its other stats by about 4–5 points," not a clean causal effect of the coaching change itself.
 
 **Decision: none of these five weights are deployed as a new model feature or a wired-in roster-adjustment module.** The plan's own Phase 4.2 instruction was explicit — "if any weight has a CI crossing zero, set it to zero" — and that leaves only one signal standing, with a real confound attached even then. Shipping a "roster adjustment" built on one confounded coefficient and four zeros isn't a real adjustment system, it's noise dressed up as one. This is a genuine, useful negative result: the naive versions of these five signals don't cleanly predict Week 1 margin on 143 games of real data, and the two most likely paths to a real signal (QB quality delta instead of a binary flag; a causally cleaner estimate of coaching-change impact) are both identified, scoped, and left for follow-up rather than shipped half-validated.
+
+---
+
+## 4.3 + 4.4 — Calibration, full benchmark suite, and the three baselines
+
+`model/calibration.py` already existed and was genuinely sophisticated (Brier score, a bucketed reliability table, Platt scaling and isotonic regression both tested honestly on out-of-fold training predictions then judged on the untouched holdout, never fit and graded on the same data). What it was missing, against this plan's own ask: log loss, MAE against actual margin, ATS accuracy, and a direct comparison to the plan's Bad/OK/Good/Vegas benchmark table — plus `data/baselines.py`'s three dumb models, now printed in the same report every time (4.4's own explicit ask).
+
+**Full report, run against the real, current model (2025 holdout, 271 games, after all of Phases 1–3's fixes):**
+
+| metric | value | rating |
+|---|---|---|
+| Straight-up accuracy | 0.668 | ok (0.67 = good, 0.67 = Vegas — essentially tied with the market) |
+| Brier score | 0.212 | ok (0.20 = good, 0.19 = Vegas) |
+| ATS accuracy | 0.509 | bad (50% is what Vegas itself gets "by design," per the plan's own table) |
+| MAE vs actual margin | 9.729 | **good** (better than the plan's own 10.2 "good" threshold, close to Vegas's ~10.0) |
+| Log loss | 0.610 | (no benchmark row in the plan's table) |
+
+**Baselines, same 271 games:**
+
+| baseline | accuracy |
+|---|---|
+| Always pick home | 0.539 |
+| Always pick the Vegas favorite | 0.653 |
+| Prior-season win% only | 0.575 (n=247 — 24 games had a team with no prior-season record) |
+
+**The model beats all three baselines** (0.668 vs 0.539/0.653/0.575) — the real bar Phase 4.4 sets, cleared.
+
+**The ATS number needs its own explanation, not just a "bad" label.** A model that takes the market's own `spread_line` as a direct input feature (this one does — `market_spread` is in `FEATURE_COLS`) will naturally track close to the market's own accuracy rather than beat it, unless it has genuine information the market hasn't already priced in. 50.9% ATS is essentially indistinguishable from the "coin flip" a perfectly efficient market should produce (the plan's own table lists Vegas itself at "50% by design" for this exact reason) — this isn't a failure of the model, it's the honest, expected signature of a well-calibrated win-probability model that isn't claiming to have found market inefficiency. Straight-up accuracy and MAE are the metrics this model is actually built to be good at, and both check out.
+
+**No leakage red flag.** The plan's own warning ("if you post 70%+ ATS in a backtest, you have leakage — go back to Phase 2") doesn't fire here: 50.9% is nowhere near that threshold, consistent with Phase 2's leakage audit having come back clean.
+
+**Calibration decision: none.** Raw Brier (0.2116) already beat both Platt (0.2120) and isotonic (0.2133) on the true holdout — the model's probabilities are already reasonably honest out of the box, and the reliability table's bucket-to-bucket deviations from the diagonal bounce in both directions with no systematic bias (e.g. overconfident in the 0.55–0.6 and 0.65–0.7 buckets, underconfident in 0.5–0.55 and 0.7–1.0), consistent with sampling noise on 15–25 games per bucket rather than a real, fixable miscalibration pattern.

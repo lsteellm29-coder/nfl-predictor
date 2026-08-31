@@ -21,10 +21,11 @@ import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, mean_absolute_error
 from sklearn.model_selection import KFold
 
 from config import HISTORICAL_SEASONS
+from data.baselines import print_baselines
 from data.fetch_injuries import historical_injury_impact
 from data.situational import blowout_loss_flags, lookahead_flags
 from model.elo import compute_elo_ratings
@@ -36,6 +37,33 @@ from model.train import (
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.joblib")
 
 BUCKET_EDGES = [0.0, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 1.0]
+
+# Week 1 Audit & Tuning Plan Phase 4.3's stated benchmarks -- reference
+# points to print backtest numbers next to, not a hard pass/fail gate.
+# "Vegas" is what the market itself achieves; beating "Good" doesn't mean
+# beating Vegas, and posting something dramatically ABOVE Vegas-level ATS
+# is itself a leakage red flag (the plan's own words: "if you post 70%+
+# ATS in a backtest, you have leakage. Go back to Phase 2"), not a win.
+BENCHMARKS = {
+    "straight_up_accuracy": {"bad": 0.60, "ok": 0.63, "good": 0.67, "vegas": 0.67, "higher_is_better": True},
+    "brier_score": {"bad": 0.24, "ok": 0.22, "good": 0.20, "vegas": 0.19, "higher_is_better": False},
+    "ats_accuracy": {"bad": 0.50, "ok": 0.52, "good": 0.55, "vegas": 0.50, "higher_is_better": True},
+    "mae_margin": {"bad": 11.5, "ok": 10.8, "good": 10.2, "vegas": 10.0, "higher_is_better": False},
+}
+# Above this, a backtest result is treated as a leakage red flag rather
+# than a win -- see BENCHMARKS' own comment.
+ATS_LEAKAGE_SUSPICION_THRESHOLD = 0.70
+
+
+def _rate_against_benchmark(metric: str, value: float) -> str:
+    b = BENCHMARKS[metric]
+    if metric == "ats_accuracy" and value >= ATS_LEAKAGE_SUSPICION_THRESHOLD:
+        return "SUSPICIOUS -- this high an ATS number usually means leakage, not skill (Phase 2)"
+    thresholds = [("good", b["good"]), ("ok", b["ok"]), ("bad", b["bad"])]
+    for label, threshold in thresholds:
+        if (b["higher_is_better"] and value >= threshold) or (not b["higher_is_better"] and value <= threshold):
+            return label
+    return "bad"
 
 
 def reliability_table(proba: np.ndarray, actual: np.ndarray) -> pd.DataFrame:
@@ -117,6 +145,57 @@ def apply_calibrator(calibrator, proba: np.ndarray) -> np.ndarray:
     return calibrator.predict_proba(proba.reshape(-1, 1))[:, 1]
 
 
+def full_backtest_metrics(test_df: pd.DataFrame, proba: np.ndarray, spread_calibration) -> dict:
+    """Week 1 Audit & Tuning Plan Phase 4.3: the full metric suite the
+    plan's benchmark table asks for, not just Brier score --
+    straight-up accuracy, Brier, log loss, MAE against the actual point
+    margin, and against-the-spread (ATS) accuracy.
+
+    ATS: this codebase's own verified convention (AUDIT.md Phase 1.2,
+    locked in by tests/test_spread_convention.py) is positive
+    spread_line = home favored, magnitude = home's expected margin. The
+    home team "covers" when their actual margin exceeds that expectation
+    (actual_margin > spread_line); the model's own ATS pick is "home
+    covers" when its own implied_spread (via the saved spread-calibration
+    regression, the same one model/predict.py uses to compare against
+    the market) is higher than the market's spread_line -- i.e. the
+    model thinks home will beat the market's own number by more than
+    the market itself expects. Games with no posted spread_line have
+    nothing to grade ATS against and are excluded, not guessed at."""
+    actual_win = test_df["home_win"].values
+    actual_margin = (test_df["home_score"] - test_df["away_score"]).values
+    implied_spread = spread_calibration.predict(proba.reshape(-1, 1))
+
+    has_spread = test_df["spread_line"].notna().values
+    ats_pick_home = implied_spread > test_df["spread_line"].values
+    home_covered = actual_margin > test_df["spread_line"].values
+    ats_correct = (ats_pick_home == home_covered)[has_spread]
+
+    return {
+        "straight_up_accuracy": accuracy_score(actual_win, (proba >= 0.5).astype(int)),
+        "brier_score": brier_score_loss(actual_win, proba),
+        # labels=[0, 1] explicit: sklearn's log_loss otherwise raises if
+        # the sample happens to contain only one outcome class (e.g. a
+        # small filtered subset, or a test fixture) -- a real backtest
+        # of 200+ games will never hit this in practice, but there's no
+        # reason this function should be fragile against a small sample
+        # when the fix is one explicit argument.
+        "log_loss": log_loss(actual_win, proba, labels=[0, 1]),
+        "mae_margin": mean_absolute_error(actual_margin, implied_spread),
+        "ats_accuracy": float(ats_correct.mean()) if len(ats_correct) else float("nan"),
+        "ats_n": int(has_spread.sum()),
+    }
+
+
+def print_benchmark_comparison(metrics: dict) -> None:
+    print(f"{'metric':22s} {'value':>10s}  {'rating':s}")
+    for metric in ("straight_up_accuracy", "brier_score", "ats_accuracy", "mae_margin"):
+        value = metrics[metric]
+        rating = _rate_against_benchmark(metric, value)
+        print(f"{metric:22s} {value:>10.3f}  {rating}")
+    print(f"{'log_loss':22s} {metrics['log_loss']:>10.3f}  (no benchmark row in the plan's own table)")
+
+
 def main():
     schedules = pd.read_parquet(SCHEDULES_PATH)
     team_stats = pd.read_parquet(TEAM_STATS_PATH)
@@ -142,15 +221,26 @@ def main():
 
     best_name, calibrator = fit_best_calibrator(model_type, train_df, raw_test_proba, test_actual)
 
+    final_proba = raw_test_proba
     if calibrator is not None:
-        calibrated_proba = apply_calibrator(calibrator, raw_test_proba)
+        final_proba = apply_calibrator(calibrator, raw_test_proba)
         print(f"\nReliability table ({best_name}-calibrated):")
-        print(reliability_table(calibrated_proba, test_actual))
+        print(reliability_table(final_proba, test_actual))
 
     saved["calibrator_name"] = best_name
     saved["calibrator"] = calibrator
     joblib.dump(saved, MODEL_PATH)
     print(f"\nSaved calibrator ({best_name}) -> {MODEL_PATH}")
+
+    # Week 1 Audit & Tuning Plan Phase 4.3 + 4.4: the full benchmark
+    # suite and the three dumb baselines, printed together every time --
+    # never "our model is X% accurate" reported on its own.
+    print(f"\n{'=' * 60}\nFull backtest report -- {TEST_SEASON} holdout, {len(test_df)} games "
+          f"({best_name}-calibrated)\n{'=' * 60}")
+    metrics = full_backtest_metrics(test_df, final_proba, saved["spread_calibration"])
+    print_benchmark_comparison(metrics)
+    print(f"ATS graded on {metrics['ats_n']} of {len(test_df)} games (rest had no posted spread_line)\n")
+    print_baselines(test_df, schedules)
 
 
 if __name__ == "__main__":
