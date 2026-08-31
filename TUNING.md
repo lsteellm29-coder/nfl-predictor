@@ -90,3 +90,42 @@ The one significant result (`coaching_change_diff`, −4.60, CI doesn't cross ze
 **No leakage red flag.** The plan's own warning ("if you post 70%+ ATS in a backtest, you have leakage — go back to Phase 2") doesn't fire here: 50.9% is nowhere near that threshold, consistent with Phase 2's leakage audit having come back clean.
 
 **Calibration decision: none.** Raw Brier (0.2116) already beat both Platt (0.2120) and isotonic (0.2133) on the true holdout — the model's probabilities are already reasonably honest out of the box, and the reliability table's bucket-to-bucket deviations from the diagonal bounce in both directions with no systematic bias (e.g. overconfident in the 0.55–0.6 and 0.65–0.7 buckets, underconfident in 0.5–0.55 and 0.7–1.0), consistent with sampling noise on 15–25 games per bucket rather than a real, fixable miscalibration pattern.
+
+---
+
+## Phase 5 — Walk-forward Week 1 backtest across every available season
+
+Every result above (Phases 4.1–4.4) is really about one thing at a time: one parameter, or one season (the true 2025 holdout). This phase is the plan's own explicit check that the whole pipeline — not just its 2025 snapshot — actually holds up: `model/backtest.py`, one command (`python -m model.backtest`), reusing `model/train.py`'s own `train_logistic`/`train_xgboost`/`predict_proba`/`train_spread_calibration` directly (not a parallel reimplementation that could quietly drift from what actually ships).
+
+**Method**: for each season with enough prior history, train fresh logistic + xgboost models on every season strictly before it, predict ONLY that season's Week 1 (never fit and tested on the same season, never previewing a later one), grade with Phase 4.3's own `full_backtest_metrics()`. Model type pinned to `xgboost` — the type the real deployed model actually uses, per `model/train.py`'s own walk-forward vote — since this backtest asks "does the shipped pipeline hold up historically," not "which model type is best in hindsight" (a different, already-answered question, `select_model_type_by_walk_forward()`). This project's cache holds 10 seasons (2016–2025, `config.HISTORICAL_SEASONS`), not the plan's literal "2015" — there's no 2015 data to fit on — so folds start once `model/train.py`'s own `MIN_WALK_FORWARD_TRAIN_SEASONS` (6) prior seasons are banked: 4 folds, 2022–2025, 63 Week 1 games total.
+
+**Per-season table (real run):**
+
+| season | n | straight-up acc | Brier | ATS | MAE |
+|---|---|---|---|---|---|
+| 2022 | 15 | 0.600 | 0.246 | 0.533 | 9.093 |
+| 2023 | 16 | 0.625 | 0.249 | 0.438 | 11.154 |
+| 2024 | 16 | 0.750 | 0.202 | 0.750 | 8.934 |
+| 2025 | 16 | 0.812 | 0.169 | 0.625 | 5.810 |
+
+**Pooled (genuine pooling — all 63 games' raw predictions concatenated and graded once, not an average of the four rows above, since that would give a subtly wrong answer for Brier/log loss/MAE):**
+
+| metric | value | rating |
+|---|---|---|
+| Straight-up accuracy | 0.698 | good (clears the plan's own 0.67 "good"/Vegas bar) |
+| Brier score | 0.216 | ok |
+| ATS accuracy | 0.587 | good — well below the 0.70 leakage-suspicion line, so a real result, not a leakage flag |
+| MAE vs actual margin | 8.742 | good |
+| Log loss | 0.628 | (no benchmark row in the plan's table) |
+
+**Baselines, same 63 games:**
+
+| baseline | accuracy |
+|---|---|
+| Always pick home | 0.508 |
+| Always pick the Vegas favorite | **0.698** |
+| Prior-season win% only | 0.649 (n=57) |
+
+**Honest result: the model ties, not beats, the always-Vegas-favorite baseline on this pooled sample (0.698 vs 0.698).** It clears always-home (0.508) and prior-season-win% (0.649) comfortably, and its Brier/MAE/ATS numbers are all independently good — but on straight-up accuracy alone, across these specific 63 games, it matches rather than exceeds picking the market favorite every time. This isn't glossed over: on a 63-game sample, a tie with the market on straight-up picks is a believably real result, not a bug — this model's own `market_spread` feature already tracks the favorite closely by construction (the same reason Phase 4.3's ATS number sits near 50%), so beating "always take the favorite" specifically was never guaranteed just because the model beats the other two, cruder baselines. Per-season variance is real too: 2022 and 2023 are meaningfully weaker (0.600–0.625 straight-up, 2023's ATS at 0.438 is a losing record against the market that year) than 2024–2025 (0.750–0.812) — with only 15–16 games per fold, no single season's number should be over-read, but the 4-fold spread itself is worth keeping in mind rather than anchoring only on the strongest (2025) season.
+
+**Exit test**: runs end-to-end with one command and prints a table — met. "Beats all three baselines" — met for 2 of 3 outright, tied (not beaten) on the third (always-Vegas-favorite) on this specific pooled sample; reported as-is rather than rounded up to a clean sweep.
