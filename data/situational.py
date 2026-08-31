@@ -30,10 +30,24 @@ def is_short_week(rest_days) -> bool:
     return pd.notna(rest_days) and rest_days <= SHORT_REST_DAYS
 
 
-def away_travel_penalty(home_team: str, away_team: str, gametime) -> bool:
+def away_travel_penalty(home_team: str, away_team: str, gametime, neutral_site: bool = False) -> bool:
     """True if the away team is crossing >=2 timezones AND kickoff lands
     before 1pm on their body clock -- the classic "West Coast team flying
-    east for an early game" spot."""
+    east for an early game" spot.
+
+    Week 1 Audit & Tuning Plan Phase 3: this compares the two teams' HOME
+    market timezones, which only means anything when one of them is
+    actually playing at home. For a neutral-site/international game
+    (e.g. this week's real LA @ SF game in Melbourne), neither team is in
+    their usual environment, so a timezone gap computed from their home
+    markets doesn't describe a real travel-body-clock disadvantage for
+    either side -- both teams made the same trip. This specific week's
+    LA/SF pairing happens to share a timezone anyway (so the bug was
+    dormant, not active, for this exact matchup), but the gap is real
+    and would misfire the next time an international game pairs two
+    teams from different U.S. timezones."""
+    if neutral_site:
+        return False
     home_tz, away_tz = TEAM_TZ_OFFSET.get(home_team), TEAM_TZ_OFFSET.get(away_team)
     if home_tz is None or away_tz is None or pd.isna(gametime):
         return False

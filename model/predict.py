@@ -342,7 +342,8 @@ def _build_features(
     feat["wind_speed"] = get_game_wind_speed(game)
 
     feat["short_week_diff"] = int(is_short_week(game["home_rest"])) - int(is_short_week(game["away_rest"]))
-    feat["away_travel_penalty"] = -1 if away_travel_penalty(home, away, game.get("gametime")) else 0
+    feat["away_travel_penalty"] = -1 if away_travel_penalty(
+        home, away, game.get("gametime"), neutral_site=game.get("location") == "Neutral") else 0
     feat["div_game"] = game.get("div_game", 0)
     feat["blowout_loss_diff"] = blowout_flags.get(home, 0) - blowout_flags.get(away, 0)
     feat["lookahead_diff"] = lookahead_flags_.get(home, 0) - lookahead_flags_.get(away, 0)

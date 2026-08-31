@@ -307,7 +307,8 @@ def build_feature_frame(
         - games["rest_days_away"].apply(is_short_week).astype(int)
     )
     games["away_travel_penalty"] = games.apply(
-        lambda g: -1 if away_travel_penalty(g["home_team"], g["away_team"], g["gametime"]) else 0,
+        lambda g: -1 if away_travel_penalty(
+            g["home_team"], g["away_team"], g["gametime"], neutral_site=g["location"] == "Neutral") else 0,
         axis=1,
     )
     games["div_game"] = games["div_game_x"]  # identical across div_game_x/_y, from the schedule directly
