@@ -19,6 +19,7 @@ from config import CURRENT_SEASON
 from data.fetch_news import fetch_news
 from model.player_stats import score_props
 from model.predict import score_week
+from model.prediction_log import log_predictions
 from report.build_report import build_report
 
 LOG_PATH = os.path.join(os.path.dirname(__file__), "logs", "season_results.csv")
@@ -266,6 +267,12 @@ def run_week(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     print(f"Logged predictions -> {LOG_PATH}")
     _, newly_graded_props = log_props_week(props, week, season)
     print(f"Logged props -> {PROPS_LOG_PATH}")
+
+    # Week 1 Audit & Tuning Plan Phase 6: a separate, append-only ledger
+    # alongside the mutable CSV logs above -- see model/prediction_log.py's
+    # docstring for why the two coexist rather than one replacing the other.
+    ledger_path, n_logged = log_predictions(predictions, week, season)
+    print(f"Logged {n_logged} prediction(s) to append-only ledger -> {ledger_path}")
 
     _generate_recaps(newly_graded_games, newly_graded_props)
 
