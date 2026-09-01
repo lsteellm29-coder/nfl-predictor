@@ -52,6 +52,23 @@ def test_grade_one_ats_none_when_no_market_spread_was_logged():
     assert result["ats_correct"] is None
 
 
+def test_grade_one_a_real_tie_is_not_graded_as_an_away_team_win():
+    """Regression test: home_score > away_score being False does NOT mean
+    the away team won -- a genuine NFL tie must be its own case, not
+    silently graded as an away-team win."""
+    result = grade_one(_prediction(), home_score=20, away_score=20, graded_at_utc="t")
+    assert result["actual_winner"] == "TIE"
+    assert result["straight_up_correct"] is None
+
+
+def test_grade_one_tie_still_grades_ats_normally():
+    # market_spread=1.0: actual margin 0 < 1.0 -> home did NOT cover.
+    # predicted_spread=3.0 > market_spread=1.0 -> model picked "home covers".
+    # Model's cover pick disagrees with the actual (no-cover) result -> wrong.
+    result = grade_one(_prediction(), home_score=20, away_score=20, graded_at_utc="t")
+    assert result["ats_correct"] is False
+
+
 def test_grade_one_passes_through_identifying_fields():
     result = grade_one(_prediction(), home_score=24, away_score=17, graded_at_utc="2026-09-10T00:00:00+00:00")
     assert result["game_id"] == "2026_01_NE_SEA"

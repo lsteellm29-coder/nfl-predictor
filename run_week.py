@@ -68,12 +68,20 @@ def _grade_pending(log_df: pd.DataFrame) -> pd.DataFrame:
             continue  # not played yet
 
         home_score, away_score = game.iloc[0]["home_score"], game.iloc[0]["away_score"]
-        actual_winner = row["home_team"] if home_score > away_score else row["away_team"]
-
         log_df.loc[idx, "actual_home_score"] = home_score
         log_df.loc[idx, "actual_away_score"] = away_score
-        log_df.loc[idx, "actual_winner"] = actual_winner
-        log_df.loc[idx, "correct"] = actual_winner == row["predicted_winner"]
+
+        if home_score == away_score:
+            # A real NFL tie -- neither team "won," so there's nothing to
+            # grade the straight-up pick right or wrong against. Distinct
+            # from a push in the ATS block below, which stays unaffected:
+            # ATS grades margin against the spread, not who won.
+            log_df.loc[idx, "actual_winner"] = "TIE"
+            log_df.loc[idx, "correct"] = pd.NA
+        else:
+            actual_winner = row["home_team"] if home_score > away_score else row["away_team"]
+            log_df.loc[idx, "actual_winner"] = actual_winner
+            log_df.loc[idx, "correct"] = actual_winner == row["predicted_winner"]
 
         if pd.notna(row["vegas_spread"]) and pd.notna(row["edge"]) and row["edge"] != 0:
             ats_margin = (home_score - away_score) - row["vegas_spread"]

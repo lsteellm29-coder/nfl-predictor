@@ -417,7 +417,9 @@ def _current_season_pbp_for_td(season: int, week: int, fallback_pbp: pd.DataFram
     if played.empty:
         return fallback_pbp.iloc[0:0]
     pbp = nfl.import_pbp_data([season], downcast=True)
-    return pbp[pbp["week"] < week]
+    result = pbp[pbp["week"] < week]
+    assert_no_leakage(result, week, context="_current_season_pbp_for_td")
+    return result
 
 
 def get_td_scorer_prediction(team: str, opponent: str, td_inputs: dict,
@@ -535,7 +537,9 @@ def _current_season_pbp(season: int, week: int, fallback_pbp: pd.DataFrame) -> p
     if played.empty:
         return fallback_pbp.iloc[0:0]
     pbp = nfl.import_pbp_data([season], downcast=True)
-    return pbp[pbp["week"] < week]
+    result = pbp[pbp["week"] < week]
+    assert_no_leakage(result, week, context="_current_season_pbp")
+    return result
 
 
 def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:

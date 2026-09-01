@@ -18,6 +18,7 @@ same "no fabricated content" contract as the rest of this project: no
 recap is more honest than a recap about nothing.
 """
 
+import html
 import json
 import os
 
@@ -115,12 +116,13 @@ def _prop_sentences(newly_graded_props: pd.DataFrame, seed: int) -> list[str]:
     if not correct_with_edge.empty:
         best = correct_with_edge.loc[correct_with_edge["edge"].abs().idxmax()]
         side = "scored" if best["actual_over"] else "didn't score"
+        player = html.escape(best["player"])
         # Full name again, not a "last name" extracted via split()[-1] --
         # that grabs a suffix ("III", "Jr.") for plenty of real players
         # (caught testing this against "Kenneth Walker III" specifically,
         # which produced "and III scored" instead of "and Walker scored").
-        sentences.append(f"Best prop call: {best['player']} anytime TD, where the model's own number was "
-                          f"furthest from the market's and {best['player']} {side}, as projected.")
+        sentences.append(f"Best prop call: {player} anytime TD, where the model's own number was "
+                          f"furthest from the market's and {player} {side}, as projected.")
 
     return sentences
 

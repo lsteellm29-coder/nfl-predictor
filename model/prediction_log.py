@@ -47,7 +47,15 @@ def model_version_hash(model_path: str = MODEL_PATH, length: int = 12) -> str:
     return digest[:length]
 
 
-def _kickoff_utc(gameday: str, gametime: str) -> str:
+def _kickoff_utc(gameday, gametime) -> str | None:
+    """None if either half of the schedule's kickoff slot is missing --
+    a flex-scheduled or not-yet-time-confirmed game still has a real
+    spread_line and home_win_prob (model/predict.py:314 only requires a
+    posted spread to score a game), so this must degrade gracefully
+    rather than raise and take down the whole logging call over one
+    non-essential field."""
+    if pd.isna(gameday) or pd.isna(gametime):
+        return None
     naive = dt.datetime.strptime(f"{gameday} {gametime}", "%Y-%m-%d %H:%M")
     localized = naive.replace(tzinfo=_SCHEDULE_TZ)
     return localized.astimezone(dt.timezone.utc).isoformat()
@@ -68,12 +76,16 @@ def log_predictions(predictions: pd.DataFrame, week: int, season: int,
         for _, game in predictions.iterrows():
             if pd.isna(game.get("home_win_prob")):
                 continue
+            kickoff_utc = _kickoff_utc(game.get("gameday"), game.get("gametime"))
+            if kickoff_utc is None:
+                print(f"Warning: no confirmed kickoff time for {game['game_id']}; "
+                      f"logging the prediction with kickoff_utc=null rather than skipping it.")
             record = {
                 "logged_at_utc": logged_at,
                 "game_id": game["game_id"],
                 "season": season,
                 "week": week,
-                "kickoff_utc": _kickoff_utc(game["gameday"], game["gametime"]),
+                "kickoff_utc": kickoff_utc,
                 "home_team": game["home_team"],
                 "away_team": game["away_team"],
                 "home_win_prob": float(game["home_win_prob"]),

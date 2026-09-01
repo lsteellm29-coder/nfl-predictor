@@ -42,6 +42,14 @@ def test_kickoff_utc_converts_eastern_afternoon_slot_correctly():
     assert result == "2025-09-07T17:00:00+00:00"
 
 
+def test_kickoff_utc_returns_none_rather_than_raising_when_gametime_missing():
+    """A flex-scheduled or not-yet-time-confirmed game still has a real
+    spread_line/home_win_prob and must not crash the whole logging call
+    over a missing, non-essential schedule field."""
+    assert _kickoff_utc("2025-09-07", float("nan")) is None
+    assert _kickoff_utc(None, "13:00") is None
+
+
 def _predictions_df(rows):
     return pd.DataFrame(rows)
 
@@ -92,3 +100,19 @@ def test_log_predictions_appends_never_truncates(isolated_log, tmp_path):
         lines = [json.loads(line) for line in f if line.strip()]
     assert len(lines) == 2  # both snapshots kept, neither overwrote the other
     assert [r["market_spread"] for r in lines] == [1.5, 2.0]
+
+
+def test_log_predictions_does_not_crash_on_a_game_with_no_kickoff_time(isolated_log, tmp_path, capsys):
+    model_path = _fake_model_file(tmp_path, b"test model")
+    game = {
+        "game_id": "2026_18_XX_YY", "gameday": "2026-01-04", "gametime": None,
+        "home_team": "YY", "away_team": "XX", "home_win_prob": 0.55,
+        "implied_spread": 1.0, "spread_line": 1.0, "total_line": 41.0, "top_factors": [],
+    }
+    path, n_written = log_predictions(_predictions_df([game]), week=18, season=2026, model_path=model_path)
+    assert n_written == 1
+
+    with open(path) as f:
+        record = json.loads(f.readline())
+    assert record["kickoff_utc"] is None
+    assert "no confirmed kickoff time" in capsys.readouterr().out

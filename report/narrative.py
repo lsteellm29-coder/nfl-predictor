@@ -9,6 +9,8 @@ stat explanation carries the preview on its own, same as before this
 module existed.
 """
 
+import html
+
 from data.player_trends import QB_TREND_THRESHOLD, RB_TREND_THRESHOLD
 from data.positional_matchups import POSITION_GROUPS
 from data.team_change_tracker import UNIT_TURNOVER_NOTABLE
@@ -169,26 +171,28 @@ def _phrase_positional(m: dict, full_name) -> str:
 
 def _phrase_qb_streak(s: dict, full_name) -> str:
     team = full_name(s["team"])
+    player = html.escape(s["player"])
     if s["direction"] == "hot":
         return (
-            f"{s['player']} has been red-hot: {team}'s starting QB is averaging {s['recent_avg']:+.2f} "
+            f"{player} has been red-hot: {team}'s starting QB is averaging {s['recent_avg']:+.2f} "
             f"EPA/dropback over his last four games, well above his {s['season_avg']:+.2f} season mark."
         )
     return (
-        f"{s['player']} has cooled off lately: {team}'s starting QB has managed just {s['recent_avg']:+.2f} "
+        f"{player} has cooled off lately: {team}'s starting QB has managed just {s['recent_avg']:+.2f} "
         f"EPA/dropback over his last four games, down from his {s['season_avg']:+.2f} season average."
     )
 
 
 def _phrase_rb_streak(s: dict, full_name) -> str:
     team = full_name(s["team"])
+    player = html.escape(s["player"])
     if s["direction"] == "hot":
         return (
-            f"{s['player']} is heating up: {team}'s lead back is averaging {s['recent_avg']:+.2f} EPA per "
+            f"{player} is heating up: {team}'s lead back is averaging {s['recent_avg']:+.2f} EPA per "
             f"carry over his last four games, well above his {s['season_avg']:+.2f} season average."
         )
     return (
-        f"{s['player']} has gone cold: {team}'s lead back is down to {s['recent_avg']:+.2f} EPA per carry "
+        f"{player} has gone cold: {team}'s lead back is down to {s['recent_avg']:+.2f} EPA per carry "
         f"over his last four games, off his {s['season_avg']:+.2f} season average."
     )
 
@@ -210,7 +214,8 @@ def _phrase_coach_h2h(h: dict, winner_coach: str) -> str:
         other, winner_wins, other_wins = h["coach_b"], h["a_wins"], h["b_wins"]
     else:
         other, winner_wins, other_wins = h["coach_a"], h["b_wins"], h["a_wins"]
-    return f"There's a coaching angle here too: {winner_coach} is {winner_wins}-{other_wins} all-time against {other}."
+    return (f"There's a coaching angle here too: {html.escape(winner_coach)} is {winner_wins}-{other_wins} "
+            f"all-time against {html.escape(other)}.")
 
 
 def _phrase_team_change(c: dict, full_name) -> str:
@@ -218,7 +223,7 @@ def _phrase_team_change(c: dict, full_name) -> str:
     parts = []
     coach_change = c.get("coach_change")
     if coach_change:
-        parts.append(f"a new head coach in {coach_change['current_coach']}")
+        parts.append(f"a new head coach in {html.escape(coach_change['current_coach'])}")
     unit_turnover = c.get("unit_turnover") or {}
     worst_unit = max(unit_turnover.items(), key=lambda kv: kv[1]["turnover_pct"], default=None)
     if worst_unit and worst_unit[1]["turnover_pct"] >= TEAM_CHANGE_TURNOVER_NOTABLE:

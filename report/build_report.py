@@ -8,6 +8,7 @@ file (Section 1 / Section 5 of the spec).
 
 import datetime
 import hashlib
+import html
 import os
 import textwrap
 
@@ -265,14 +266,14 @@ def _coach_qb_line(game: pd.Series) -> str:
     home_coach, away_coach = game.get("home_coach"), game.get("away_coach")
     home_qb, away_qb = game.get("home_qb_name"), game.get("away_qb_name")
     if pd.notna(away_coach):
-        bit = f"{_full_name(game['away_team'])}: coached by {away_coach}"
+        bit = f"{_full_name(game['away_team'])}: coached by {html.escape(away_coach)}"
         if pd.notna(away_qb):
-            bit += f", starting {away_qb} at QB"
+            bit += f", starting {html.escape(away_qb)} at QB"
         parts.append(bit)
     if pd.notna(home_coach):
-        bit = f"{_full_name(game['home_team'])}: coached by {home_coach}"
+        bit = f"{_full_name(game['home_team'])}: coached by {html.escape(home_coach)}"
         if pd.notna(home_qb):
-            bit += f", starting {home_qb} at QB"
+            bit += f", starting {html.escape(home_qb)} at QB"
         parts.append(bit)
     return "  |  ".join(parts)
 
@@ -467,7 +468,7 @@ def _fmt_td_scorer(pred: dict | None) -> str:
         adj_note = " -- knocked down for a tough matchup"
     else:
         adj_note = ""
-    return (f"{pred['player']} -- {pred['prob'] * 100:.0f}% anytime-TD estimate{adj_note} "
+    return (f"{html.escape(pred['player'])} -- {pred['prob'] * 100:.0f}% anytime-TD estimate{adj_note} "
             f"({pred['player_share'] * 100:.0f}% of the team's red-zone touches, {pred['games']} games)")
 
 

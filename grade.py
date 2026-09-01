@@ -40,8 +40,16 @@ def grade_one(prediction: dict, home_score: float, away_score: float, graded_at_
     separate from grade()'s file I/O and the nfl_data_py schedule lookup
     so this logic (straight-up + ATS correctness, push exclusion) is
     unit-testable without a network call."""
-    actual_winner = prediction["home_team"] if home_score > away_score else prediction["away_team"]
-    predicted_winner = prediction["home_team"] if prediction["home_win_prob"] >= 0.5 else prediction["away_team"]
+    if home_score == away_score:
+        # A real NFL tie -- neither team "won," so there's nothing to grade
+        # the straight-up pick right or wrong against. Distinct from a push
+        # in the ATS block below, which stays unaffected: ATS grades margin
+        # against the spread, not who won.
+        actual_winner, straight_up_correct = "TIE", None
+    else:
+        actual_winner = prediction["home_team"] if home_score > away_score else prediction["away_team"]
+        predicted_winner = prediction["home_team"] if prediction["home_win_prob"] >= 0.5 else prediction["away_team"]
+        straight_up_correct = actual_winner == predicted_winner
 
     ats_correct = None
     if prediction.get("market_spread") is not None:
@@ -56,7 +64,7 @@ def grade_one(prediction: dict, home_score: float, away_score: float, graded_at_
         "graded_at_utc": graded_at_utc,
         "actual_home_score": home_score, "actual_away_score": away_score,
         "actual_winner": actual_winner,
-        "straight_up_correct": actual_winner == predicted_winner,
+        "straight_up_correct": straight_up_correct,
         "ats_correct": ats_correct,
     }
 

@@ -18,6 +18,7 @@ support.
 """
 
 import base64
+import html
 import os
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
@@ -434,7 +435,7 @@ def game_anchor(game) -> str:
 def td_chip_parts(pred: dict | None) -> tuple[str, str]:
     if not pred:
         return "--", "no data"
-    return f"{pred['prob'] * 100:.0f}%", pred["player"]
+    return f"{pred['prob'] * 100:.0f}%", html.escape(pred["player"])
 
 
 DAY_BLOCK = """<div class="day">{day_header}</div>

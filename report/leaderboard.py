@@ -13,6 +13,8 @@ manufacture a false equivalence the rest of this project's "no
 fabricated confidence" discipline doesn't allow elsewhere.
 """
 
+import html
+
 import pandas as pd
 
 LEADERBOARD_SECTION = """<div class="section-head" id="leaderboard"><span class="accent">&#9679;</span> Biggest Edges This Week</div>
@@ -105,7 +107,7 @@ def leaderboard_html(predictions: pd.DataFrame, props: pd.DataFrame, embed_logo_
         rows = []
         for p in props_ranked:
             rows.append(PROP_ROW.format(
-                player=p["player"], team=p["team"],
+                player=html.escape(p["player"]), team=html.escape(p["team"]),
                 edge_class=_edge_class(p["abs_edge"]), edge_str=f"{p['edge'] * 100:+.0f} pts",
             ))
         cols.append(f'<div><div class="edge-col-label">Player Props (Anytime TD)</div>{"".join(rows)}</div>')
