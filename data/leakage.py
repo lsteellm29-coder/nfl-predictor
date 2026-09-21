@@ -35,3 +35,36 @@ def assert_no_leakage(df: pd.DataFrame, week: int, week_col: str = "week", conte
             f"LEAKAGE{label}: {len(bad)} row(s) at or after week {week} found in a pre-game "
             f"feature table. Offending rows:\n{bad.head(5).to_string()}"
         )
+
+
+def assert_pregame_selection(rows: pd.DataFrame, schedule: pd.DataFrame, season: int, week: int,
+                             context: str = "") -> None:
+    """The counterpart of assert_no_leakage for data/live_stats.py's selection,
+    which deliberately takes rows AT/AFTER `week` (a rolling row for week W is
+    already pre-game -- see that module's docstring), so a plain "no row >=
+    week" check can't apply to it.
+
+    What it checks instead: each chosen row's `games_played` (the number of that
+    team's scheduled games before the row) must equal the number of that team's
+    scheduled regular-season games strictly before `week`. Fewer means the
+    selection is stale (the bug this replaced: W-1's row, one game behind, or
+    the empty Week 1 row for W=2); more means a game at/after `week` got in."""
+    reg = schedule[(schedule["game_type"] == "REG") & (schedule["season"] == season)
+                   & (schedule["week"] < week)]
+    expected = reg.groupby("home_team").size().add(reg.groupby("away_team").size(), fill_value=0)
+    got = rows.set_index("team")["games_played"]
+    bad = {t: (int(got[t]), int(expected.get(t, 0))) for t in got.index if got[t] != expected.get(t, 0)}
+    # every team that still has a game at/after `week` must have been selected -- a team
+    # silently missing from `rows` would quietly fall back to last season's stats
+    upcoming = schedule[(schedule["game_type"] == "REG") & (schedule["season"] == season)
+                        & (schedule["week"] >= week)]
+    absent = sorted((set(upcoming["home_team"]) | set(upcoming["away_team"])) - set(got.index))
+    if absent:
+        label = f" ({context})" if context else ""
+        raise AssertionError(f"PRE-GAME SELECTION{label}: no pre-game row selected for {absent} at week {week}")
+    if bad:
+        label = f" ({context})" if context else ""
+        raise AssertionError(
+            f"PRE-GAME SELECTION{label}: games_played != regular-season games scheduled before week "
+            f"{week} for {len(bad)} team(s) (team: (got, expected)): {bad}"
+        )

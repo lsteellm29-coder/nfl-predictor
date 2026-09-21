@@ -34,7 +34,9 @@ from report.recap import RECAP_STYLE
 from report.team_hub import TEAM_HUB_STYLE, team_hubs_html
 from report.theme import DAY_BLOCK, GAME_BLOCK, PRINT_STYLE, THEME_STYLE, game_anchor, td_chip_parts
 from report.track_record import TRACK_RECORD_STYLE, track_record_html
+from data.live_stats import season_to_date_frames
 from data.team_stats import SCHEDULES_PATH, TEAM_STATS_PATH
+from model.prediction_log import pre_game_picks
 from model.td_ensemble import BACKTEST_PATH
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
@@ -186,7 +188,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="stat"><div class="num">{n_games}</div><div class="label">Games this week</div></div>
   </div>
 
-  <div class="caveat">{model_type_article} {model_type} model trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record), Elo ratings, injury reports, and weather, versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Player props (where posted) use each player's own season rate, adjusted for the opponent's defense-by-position stats and current injury status, against a normal or Poisson distribution depending on the stat. Every "Higher/Lower" and team button below is colored to match what the model actually calculated, not dressed up for effect -- a thin edge shows as a thin edge. Informed estimates, not guarantees.</div>
+  <div class="caveat">{model_type_article} {model_type} model trained on team-level rolling stats (scoring, EPA/play, third-down and red-zone rates, turnover margin, ATS record), Elo ratings, injury reports, and weather, versus the current Vegas line. TD-scorer odds start from each player's own recent scoring rate, then adjust for the opposing defense's TDs-allowed rate and this game's Vegas-implied scoring environment. Player props (where posted) use each player's own season rate, adjusted for the opponent's defense-by-position stats and current injury status, against a normal or Poisson distribution depending on the stat. Every "Higher/Lower" and team button below is colored to match what the model actually calculated, not dressed up for effect -- a thin edge shows as a thin edge. Informed estimates, not guarantees.{lines_note}</div>
 
   <div class="top-tabs" role="tablist">
     <button type="button" class="top-tab is-active" data-tab-target="predictions" role="tab"
@@ -478,6 +480,44 @@ def _game_props(props: pd.DataFrame | None, game: pd.Series) -> pd.DataFrame | N
     return props[(props["team"] == game["home_team"]) | (props["team"] == game["away_team"])]
 
 
+def annotate_results(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Adds `pre_game_pick` (team code, or None) -- the pick logged in the
+    prediction ledger before kickoff -- so a card for a game that has already
+    been played can grade that pick, and say plainly when there isn't one."""
+    picks = pre_game_picks()
+    predictions = predictions.copy()
+    predictions["pre_game_pick"] = predictions["game_id"].map(picks) if "game_id" in predictions.columns else None
+    return predictions
+
+
+def _final_result_html(game: pd.Series) -> str:
+    home_score, away_score = game.get("home_score"), game.get("away_score")
+    if pd.isna(home_score) or pd.isna(away_score):
+        return ""
+    home, away = game["home_team"], game["away_team"]
+    score = f"{away} {int(away_score)} &ndash; {home} {int(home_score)}"
+    pick = game.get("pre_game_pick")
+    if not isinstance(pick, str) or not pick:
+        verdict = ' <span class="result-note">played before it was scored &mdash; no pre-game pick on record</span>'
+    elif home_score == away_score:
+        verdict = f' <span class="result-note">tie &mdash; model had {pick}</span>'
+    else:
+        ok = pick == (home if home_score > away_score else away)
+        verdict = (f' <span class="result-badge {"is-correct" if ok else "is-wrong"}">'
+                   f'Model picked {pick}: {"correct" if ok else "missed"}</span>')
+    return f'<div class="result-final"><strong>FINAL</strong> {score}{verdict}</div>'
+
+
+def lines_source_note(predictions: pd.DataFrame) -> str:
+    """One sentence for the footer when this week's lines aren't the live
+    sportsbook feed, so a reader isn't left assuming they are."""
+    if "lines_source" in predictions.columns and (predictions["lines_source"] == "nflverse").any():
+        return (" Game lines this week come from nflverse's schedule data (the live sportsbook feed was "
+                "unavailable), so they can differ slightly from what books are showing right now, and "
+                "player-prop market lines aren't included.")
+    return ""
+
+
 def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
               headshot_url_fn=espn_headshot_url, logo_url_fn=get_logo_url) -> dict:
     has_pred = pd.notna(game.get("home_win_prob"))
@@ -528,6 +568,7 @@ def _row_data(game: pd.Series, props: pd.DataFrame | None = None,
         "home_logo": get_logo_url(game["home_team"]),
         "coaches": _coach_qb_line(game),
         "kickoff": kickoff,
+        "result_html": _final_result_html(game),
         "anchor": game_anchor(game),
         "winner": winner,
         "win_pct": win_pct_str,
@@ -591,6 +632,7 @@ def print_report(predictions: pd.DataFrame, week: int, season: int) -> None:
 
 def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: pd.DataFrame | None = None,
                        news: list[dict] | None = None) -> str:
+    predictions = annotate_results(predictions)
     days_html = []
     for day, weekday, day_games in _by_day(predictions):
         games_html = "\n".join(GAME_BLOCK.format(**_row_data(g, props)) for _, g in day_games.iterrows())
@@ -610,6 +652,13 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
     team_stats_df = pd.read_parquet(TEAM_STATS_PATH) if os.path.exists(TEAM_STATS_PATH) else pd.DataFrame()
     schedules_df = pd.read_parquet(SCHEDULES_PATH) if os.path.exists(SCHEDULES_PATH) else pd.DataFrame()
     td_backtest_df = pd.read_parquet(BACKTEST_PATH) if os.path.exists(BACKTEST_PATH) else pd.DataFrame()
+    # Those caches end at last season (data.fetch_historical only pulls completed
+    # seasons), so on their own the hubs would keep showing last year's record and
+    # EPA trend all season. Extend them with this season's results so far.
+    try:
+        team_stats_df, schedules_df = season_to_date_frames(season, team_stats_df, schedules_df)
+    except Exception as e:
+        print(f"Warning: couldn't add this season's results to the team hubs ({e}); showing cached history only.")
     # Combined Build Plan Part 3 step 3: see build_artifact.py's identical
     # block for why this is fetched again here rather than threaded
     # through predictions.
@@ -648,6 +697,7 @@ def build_html_report(predictions: pd.DataFrame, week: int, season: int, props: 
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
         baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "N/A",
         test_season=metrics["test_season"] or "recent",
+        lines_note=lines_source_note(predictions),
     )
 
 

@@ -12,7 +12,8 @@ import pandas as pd
 import requests
 
 from config import CURRENT_SEASON, ODDS_API_KEY
-from data.odds_aggregation import aggregate_two_sided
+from data.odds_aggregation import aggregate_two_sided, devig_pair
+from data.odds_http import odds_get
 
 ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/"
 
@@ -21,6 +22,8 @@ SCHEDULE_COLS = [
     "away_team", "home_team", "home_rest", "away_rest", "div_game",
     "roof", "location", "away_qb_id", "away_qb_name", "home_qb_id", "home_qb_name",
     "away_coach", "home_coach",
+    # final score once played (NaN until then) -- lets the report show results on the card
+    "home_score", "away_score",
 ]
 
 
@@ -43,7 +46,7 @@ def _team_name_to_abbr(season: int) -> dict:
 def fetch_odds_events() -> list[dict]:
     if not ODDS_API_KEY:
         raise RuntimeError("ODDS_API_KEY not set (expected in .env)")
-    resp = requests.get(
+    resp = odds_get(
         ODDS_API_URL,
         params={
             "apiKey": ODDS_API_KEY,
@@ -57,7 +60,6 @@ def fetch_odds_events() -> list[dict]:
         },
         timeout=15,
     )
-    resp.raise_for_status()
     return resp.json()
 
 
@@ -126,10 +128,51 @@ def fetch_odds(season: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+LINES_SOURCE_ODDS_API = "odds_api"
+LINES_SOURCE_NFLVERSE = "nflverse"
+
+
+def fetch_odds_nflverse(season: int, week: int) -> pd.DataFrame:
+    """Same shape as fetch_odds(), from nflverse's own spread/total/moneyline
+    for the week. The fallback for when The Odds API is unavailable (deactivated
+    or exhausted key, outage). These are the same numbers the model was trained
+    on, but they are one snapshot rather than a live multi-book consensus, so
+    they carry no book counts and no event_id -- event_id is the key the player-
+    props code uses to pull per-game market lines from the Odds API, so games
+    without one simply get no prop market lines rather than erroring."""
+    sched = nfl.import_schedules([season])
+    week_games = sched[(sched["game_type"] == "REG") & (sched["week"] == week)]
+    odds = week_games[["home_team", "away_team", "spread_line", "total_line",
+                       "home_moneyline", "away_moneyline"]].copy()
+
+    def _home_prob(row):
+        if pd.isna(row["home_moneyline"]) or pd.isna(row["away_moneyline"]):
+            return None
+        return devig_pair(row["home_moneyline"], row["away_moneyline"])[0]
+
+    odds["home_ml_prob"] = odds.apply(_home_prob, axis=1) if len(odds) else pd.Series(dtype=float)
+    odds["event_id"] = None
+    for col in ("n_books", "spread_n_books", "total_n_books"):
+        odds[col] = None
+    return odds.reset_index(drop=True)
+
+
 def fetch_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
+    """The week's games with lines. Uses The Odds API; if that is unavailable
+    (any HTTP/network failure, or no key configured) it falls back to nflverse's
+    lines rather than taking the whole run down, and says so -- every returned
+    row carries `lines_source` so the report and the prediction ledger can record
+    which one a prediction was actually made against."""
     schedule = fetch_schedule(season, week)
-    odds = fetch_odds(season)
-    return schedule.merge(odds, on=["home_team", "away_team"], how="left")
+    try:
+        odds, source = fetch_odds(season), LINES_SOURCE_ODDS_API
+    except (requests.RequestException, RuntimeError) as e:
+        print(f"Warning: live sportsbook odds unavailable ({e}); using nflverse's spread/total/"
+              f"moneyline for week {week} instead. Player-prop market lines won't be available.")
+        odds, source = fetch_odds_nflverse(season, week), LINES_SOURCE_NFLVERSE
+    games = schedule.merge(odds, on=["home_team", "away_team"], how="left")
+    games["lines_source"] = source
+    return games
 
 
 def main():

@@ -1,5 +1,10 @@
 # tests for grade.py's pure grading arithmetic (Week 1 Audit & Tuning Plan Phase 6)
-from grade import grade_one
+import json
+
+import pandas as pd
+
+import grade as grade_module
+from grade import grade_one, logged_before_kickoff
 
 
 def _prediction(**overrides):
@@ -76,3 +81,31 @@ def test_grade_one_passes_through_identifying_fields():
     assert result["graded_at_utc"] == "2026-09-10T00:00:00+00:00"
     assert result["actual_home_score"] == 24
     assert result["actual_away_score"] == 17
+
+
+def test_logged_before_kickoff_eligibility():
+    assert logged_before_kickoff(_prediction(logged_at_utc="2026-09-20T16:00:00+00:00",
+                                             kickoff_utc="2026-09-20T17:00:00+00:00"))
+    assert not logged_before_kickoff(_prediction(logged_at_utc="2026-09-20T18:00:00+00:00",
+                                                 kickoff_utc="2026-09-20T17:00:00+00:00"))
+    assert logged_before_kickoff(_prediction(kickoff_utc=None))            # can't be checked: stays eligible
+    assert logged_before_kickoff(_prediction())                            # legacy record without the field
+
+
+def test_grade_skips_hindsight_records_but_grades_real_ones(tmp_path, monkeypatch):
+    ledger, graded = tmp_path / "predictions.jsonl", tmp_path / "predictions_graded.jsonl"
+    good = _prediction(game_id="g_good", logged_at_utc="2026-09-20T16:00:00+00:00",
+                       kickoff_utc="2026-09-20T17:00:00+00:00")
+    late = _prediction(game_id="g_late", logged_at_utc="2026-09-20T18:00:00+00:00",
+                       kickoff_utc="2026-09-20T17:00:00+00:00")
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in (good, late)))
+    monkeypatch.setattr(grade_module, "PREDICTIONS_LOG_PATH", str(ledger))
+    monkeypatch.setattr(grade_module, "GRADED_LOG_PATH", str(graded))
+    schedule = pd.DataFrame([{"game_id": g, "home_score": 24.0, "away_score": 17.0} for g in ("g_good", "g_late")])
+    monkeypatch.setattr(grade_module.nfl, "import_schedules", lambda seasons: schedule)
+    for r in (good, late):
+        r["season"] = 2026
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in (good, late)))
+
+    assert grade_module.grade() == 1
+    assert [json.loads(line)["game_id"] for line in graded.read_text().splitlines()] == ["g_good"]

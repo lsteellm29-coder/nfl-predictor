@@ -92,7 +92,14 @@ def run(week: int | None = None, season: int = CURRENT_SEASON) -> bool:
 
 
 def main():
-    sys.exit(0 if run() else 1)
+    # informational only (weekly_pipeline.sh says so): a data-source hiccup -- a dropped
+    # connection, a DNS failure -- must never abort the whole weekly run
+    try:
+        ok = run()
+    except Exception as e:
+        print(f"Injury-ID validation skipped ({type(e).__name__}: {e}) -- informational only, not blocking.")
+        ok = True
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

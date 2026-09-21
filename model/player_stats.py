@@ -33,6 +33,7 @@ from data.fetch_injuries import (
 from data.fetch_props import fetch_props_for_week
 from data.fetch_week import fetch_week
 from data.leakage import assert_no_leakage
+from data.pbp_loader import load_season_pbp
 from data.positional_matchups import position_map
 from data.rosters import fetch_rosters
 from model.td_model import (
@@ -162,7 +163,7 @@ def _current_season_pbp(season: int, week: int, fallback_pbp: pd.DataFrame) -> p
     ]
     if played.empty:
         return fallback_pbp.iloc[0:0]
-    pbp = nfl.import_pbp_data([season], downcast=True)
+    pbp = load_season_pbp(season)
     current = pbp[pbp["week"] < week]
     # Phase 2 leakage tripwire (Week 1 Audit & Tuning Plan) -- the props
     # model's own equivalent of model/predict.py's _current_season_stats()

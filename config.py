@@ -14,3 +14,9 @@ CURRENT_SEASON = 2026
 
 # Last 10 completed seasons -- the stable sample window from the project spec.
 HISTORICAL_SEASONS = list(range(CURRENT_SEASON - 10, CURRENT_SEASON))
+
+# nfl_data_py has no retries and a broken error handler; add retries to every download at once
+# (see data/nfl_net.py). Every entry point imports config, so this runs before any fetch.
+from data.nfl_net import install_retries  # noqa: E402
+
+install_retries()

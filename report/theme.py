@@ -268,6 +268,8 @@ a { color: inherit; }
   text-align: right;
   white-space: nowrap;
 }
+.result-final { font-size: 13px; margin: 2px 0 8px; color: var(--ink); }
+.result-final .result-note { color: var(--muted); font-size: 12px; margin-left: 6px; }
 .matchup-row-right {
   display: flex;
   align-items: center;
@@ -454,6 +456,7 @@ GAME_BLOCK = """<div class="game" id="{anchor}">
       <div class="kickoff">{kickoff}</div>
     </div>
   </div>
+  {result_html}
   <div class="subline">{coaches}</div>
 
   {game_pick_card}

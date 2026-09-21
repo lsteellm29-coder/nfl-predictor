@@ -16,6 +16,7 @@ import pandas as pd
 import requests
 
 from config import ODDS_API_KEY
+from data.odds_http import odds_get
 from data.odds_aggregation import aggregate_one_sided, ladder_by_point
 
 EVENT_ODDS_URL = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event_id}/odds"
@@ -40,7 +41,7 @@ ALT_LINE_MARKETS = ["alternate_spreads", "alternate_totals", "team_totals"]
 def fetch_event_odds(event_id: str) -> dict:
     if not ODDS_API_KEY:
         raise RuntimeError("ODDS_API_KEY not set (expected in .env)")
-    resp = requests.get(
+    resp = odds_get(
         EVENT_ODDS_URL.format(event_id=event_id),
         params={
             "apiKey": ODDS_API_KEY,
@@ -56,7 +57,6 @@ def fetch_event_odds(event_id: str) -> dict:
         },
         timeout=15,
     )
-    resp.raise_for_status()
     return resp.json()
 
 

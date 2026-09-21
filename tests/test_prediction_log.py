@@ -1,4 +1,5 @@
 # tests for the append-only prediction ledger (Week 1 Audit & Tuning Plan Phase 6)
+import datetime as dt
 import hashlib
 import json
 
@@ -6,6 +7,10 @@ import pandas as pd
 import pytest
 
 from model.prediction_log import _kickoff_utc, log_predictions, model_version_hash
+
+# a fixed instant before every kickoff these fixtures use, so the new "never log a game that
+# has already kicked off" guard doesn't depend on the real clock
+BEFORE_ALL_KICKOFFS = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
 
 
 @pytest.fixture
@@ -70,7 +75,7 @@ def test_log_predictions_writes_one_line_per_gradeable_game(isolated_log, tmp_pa
             "implied_spread": None, "spread_line": None, "total_line": None, "top_factors": None,
         },
     ])
-    path, n_written = log_predictions(predictions, week=1, season=2026, model_path=model_path)
+    path, n_written = log_predictions(predictions, week=1, season=2026, model_path=model_path, now=BEFORE_ALL_KICKOFFS)
     assert n_written == 1
 
     with open(path) as f:
@@ -93,8 +98,8 @@ def test_log_predictions_appends_never_truncates(isolated_log, tmp_path):
         "home_team": "SEA", "away_team": "NE", "home_win_prob": 0.58,
         "implied_spread": 2.5, "spread_line": 1.5, "total_line": 44.5, "top_factors": [],
     }
-    log_predictions(_predictions_df([game]), week=1, season=2026, model_path=model_path)
-    log_predictions(_predictions_df([{**game, "spread_line": 2.0}]), week=1, season=2026, model_path=model_path)
+    log_predictions(_predictions_df([game]), week=1, season=2026, model_path=model_path, now=BEFORE_ALL_KICKOFFS)
+    log_predictions(_predictions_df([{**game, "spread_line": 2.0}]), week=1, season=2026, model_path=model_path, now=BEFORE_ALL_KICKOFFS)
 
     with open(isolated_log) as f:
         lines = [json.loads(line) for line in f if line.strip()]
@@ -109,7 +114,7 @@ def test_log_predictions_does_not_crash_on_a_game_with_no_kickoff_time(isolated_
         "home_team": "YY", "away_team": "XX", "home_win_prob": 0.55,
         "implied_spread": 1.0, "spread_line": 1.0, "total_line": 41.0, "top_factors": [],
     }
-    path, n_written = log_predictions(_predictions_df([game]), week=18, season=2026, model_path=model_path)
+    path, n_written = log_predictions(_predictions_df([game]), week=18, season=2026, model_path=model_path, now=BEFORE_ALL_KICKOFFS)
     assert n_written == 1
 
     with open(path) as f:

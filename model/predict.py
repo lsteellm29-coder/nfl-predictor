@@ -23,6 +23,8 @@ from data.fetch_injuries import fetch_current_injury_impact
 from data.fetch_week import fetch_week
 from data.fetch_weather import fetch_forecast
 from data.leakage import assert_no_leakage
+from data.live_stats import pregame_team_stats
+from data.pbp_loader import load_season_pbp
 from data.player_trends import qb_game_log, qb_streak, rb_game_log, rb_streak
 from data.positional_matchups import build_position_tables, game_mismatches, position_map
 from data.rosters import fetch_rosters
@@ -52,11 +54,16 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.joblib")
 
 SPLIT_COLS = ["home_point_diff_avg", "away_point_diff_avg"]
 STATS_COLS = STAT_COLS + SPLIT_COLS
+PBP_DERIVED_STAT_COLS = ["off_epa_per_play_avg", "def_epa_per_play_avg", "off_ypp_avg", "def_ypp_avg"]
 
 
 def _current_season_stats(season: int, week: int) -> pd.DataFrame:
-    """Rolling stats built from this season's games played before `week`.
-    Empty if the season hasn't started yet or no one has played."""
+    """Rolling stats from this season's games played before `week`, one row per
+    team. Empty if the season hasn't started yet or no one has played.
+
+    The selection itself -- and why it is each team's first rolling row at/after
+    `week`, not the last row before it -- lives in data/live_stats.py, along with
+    its own leakage tripwire (data/leakage.py assert_pregame_selection)."""
     schedule = nfl.import_schedules([season])
     played = schedule[
         (schedule["game_type"] == "REG")
@@ -66,18 +73,10 @@ def _current_season_stats(season: int, week: int) -> pd.DataFrame:
     if played.empty:
         return pd.DataFrame(columns=["team", *STATS_COLS])
 
-    pbp = nfl.import_pbp_data([season], downcast=True)
-    team_game_stats = build_team_game_stats(schedule, pbp)
-    rolling = build_rolling_team_stats(team_game_stats)
-    rolling = rolling[rolling["week"] < week]
-    # Phase 2 leakage tripwire: this filter IS the actual enforcement
-    # boundary for current-season rolling stats -- a separate, explicit
-    # assertion right after it (rather than trusting the filter
-    # expression alone) means a future refactor that accidentally
-    # loosens it to `<=` fails loudly here instead of quietly training
-    # on a team's own game.
-    assert_no_leakage(rolling, week, context="_current_season_stats")
-    return rolling.sort_values("week").groupby("team").tail(1)
+    pbp = load_season_pbp(season)
+    # required_cols: the play-by-play-derived stats. (The schedule-derived ones -- points, ATS --
+    # exist even if pbp is missing entirely, so guarding on them could never fire.)
+    return pregame_team_stats(schedule, pbp, season, week, required_cols=PBP_DERIVED_STAT_COLS)
 
 
 def _fallback_stats(season: int) -> pd.DataFrame:
@@ -231,12 +230,17 @@ def fallback_confidence_caveat(team: str, prior_season: int, turnover: dict, fal
     }
 
 
-def get_current_elo_ratings(season: int) -> dict:
-    """Each team's {"off", "def"} Elo ratings as of right now, computed by
-    replaying every game from the start of the cached historical window
-    through whatever's been played of the current season so far -- Elo has
-    to be run continuously to mean anything, unlike the rolling stats
+def get_current_elo_ratings(season: int, week: int | None) -> dict:
+    """Each team's {"off", "def"} Elo ratings, computed by replaying every game
+    from the start of the cached historical window through the current season --
+    Elo has to be run continuously to mean anything, unlike the rolling stats
     which reset each season.
+
+    `week` is required (pass None for "as of right now") so a caller can't quietly forget
+    it. With a week, ratings are as of the START of that week: current-season games
+    from `week` onward are not replayed, even ones already played (Thursday
+    night, or a Sunday afternoon refresh). Without this, a game already played
+    this week was "predicted" from ratings that already contained its own result.
 
     The full current-season schedule (including future, unplayed games) is
     passed in, not filtered to a target week -- unplayed games never update
@@ -245,10 +249,44 @@ def get_current_elo_ratings(season: int) -> dict:
     regression-to-the-mean actually fires even before the season's first
     game has been played."""
     historical = pd.read_parquet(SCHEDULES_PATH)
-    current = nfl.import_schedules([season])
+    historical = historical[historical["season"] < season]  # never replay `season` itself twice
+    current = nfl.import_schedules([season]).copy()
+    if week is not None:
+        current.loc[current["week"] >= week, ["home_score", "away_score"]] = np.nan
     combined = pd.concat([historical, current], ignore_index=True)
     _, ratings = compute_elo_ratings(combined)
     return ratings
+
+
+def fill_missing_stat_values(stats: pd.DataFrame, fallback: pd.DataFrame) -> tuple[pd.DataFrame, list]:
+    """Early in a season a single team stat can legitimately be undefined -- no
+    red-zone trips yet (red_zone_td_pct), only pushes so far (ats_win_pct_*), or no
+    home (or no away) game yet (the home/away point-diff splits).
+
+    Training fills every such cell from that team's final row of the prior season
+    (model/train.py's _team_stats_with_fallback, one column at a time), so live
+    scoring does the same. If the team has no prior value either, training drops the
+    row; live scoring can't, so a STAT_COLS cell falls back to the league mean of the
+    genuinely known values, while a split cell is left NaN, which _build_features
+    already turns into a neutral 0.0 home-field context. Returns (filled stats,
+    [(team, stat), ...] of what was filled) so callers can say so."""
+    stats = stats.copy()
+    filled = []
+    for col in STATS_COLS:
+        if col not in stats.columns:
+            continue
+        missing = stats.index[stats[col].isna()]
+        known_mean = stats[col].mean()  # of genuinely known values only, not ones filled below
+        for team in missing:
+            prior = fallback.at[team, col] if team in fallback.index and col in fallback.columns else np.nan
+            if pd.notna(prior):
+                stats.at[team, col] = prior
+            elif col in SPLIT_COLS:
+                continue  # stays NaN -> home_field_context_diff = 0.0
+            else:
+                stats.at[team, col] = known_mean
+            filled.append((team, col))
+    return stats, filled
 
 
 def get_pregame_stats(season: int, week: int) -> pd.DataFrame:
@@ -257,8 +295,12 @@ def get_pregame_stats(season: int, week: int) -> pd.DataFrame:
     combined = pd.concat([
         current,
         fallback[~fallback["team"].isin(current["team"])],
-    ])
-    return combined.set_index("team")
+    ]).set_index("team")
+    combined, filled = fill_missing_stat_values(combined, fallback.set_index("team"))
+    if filled:
+        print(f"Note: {len(filled)} early-season team stat(s) were undefined and filled from the "
+              f"prior season: {', '.join(f'{t} {c}' for t, c in filled)}")
+    return combined
 
 
 def get_game_wind_speed(game: pd.Series) -> float:
@@ -416,7 +458,7 @@ def _current_season_pbp_for_td(season: int, week: int, fallback_pbp: pd.DataFram
     played = schedule[(schedule["game_type"] == "REG") & schedule["home_score"].notna() & (schedule["week"] < week)]
     if played.empty:
         return fallback_pbp.iloc[0:0]
-    pbp = nfl.import_pbp_data([season], downcast=True)
+    pbp = load_season_pbp(season)
     result = pbp[pbp["week"] < week]
     assert_no_leakage(result, week, context="_current_season_pbp_for_td")
     return result
@@ -536,7 +578,7 @@ def _current_season_pbp(season: int, week: int, fallback_pbp: pd.DataFrame) -> p
     ]
     if played.empty:
         return fallback_pbp.iloc[0:0]
-    pbp = nfl.import_pbp_data([season], downcast=True)
+    pbp = load_season_pbp(season)
     result = pbp[pbp["week"] < week]
     assert_no_leakage(result, week, context="_current_season_pbp")
     return result
@@ -555,7 +597,7 @@ def score_week(week: int, season: int = CURRENT_SEASON) -> pd.DataFrame:
 
     games = fetch_week(week, season)
     stats = get_pregame_stats(season, week)
-    elo_ratings = get_current_elo_ratings(season)
+    elo_ratings = get_current_elo_ratings(season, week)
     blowout_flags, lookahead_flags_now = get_situational_flags(season, week)
 
     # Combined Build Plan Part 2: computed once per call, same as stats/

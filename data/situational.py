@@ -63,8 +63,14 @@ def away_travel_penalty(home_team: str, away_team: str, gametime, neutral_site: 
 
 def _team_game_margins(schedules: pd.DataFrame) -> pd.DataFrame:
     """season, week, team, margin (that team's own point differential) for
-    every completed REG game, one row per team per game."""
-    reg = schedules[(schedules["game_type"] == "REG") & schedules["home_score"].notna()].copy()
+    every scheduled REG game, one row per team per game. margin is NaN for a game
+    that hasn't been played yet -- the row still has to exist, because
+    blowout_loss_flags() needs a row for each UPCOMING game to hang "how did this
+    team's previous game go" on. Building this from completed games only (as this
+    used to) meant live scoring never found a row for any game not yet played, so
+    the flag was silently 0 for every upcoming game, while training -- run on
+    completed seasons -- had it for all of them."""
+    reg = schedules[schedules["game_type"] == "REG"].copy()
     reg["result"] = reg["home_score"] - reg["away_score"]
 
     home = reg[["season", "week", "home_team", "result"]].rename(
@@ -78,7 +84,8 @@ def _team_game_margins(schedules: pd.DataFrame) -> pd.DataFrame:
 def blowout_loss_flags(schedules: pd.DataFrame) -> pd.DataFrame:
     """season, week, team -> 1 if that team's most recent game *within the
     same season* was a loss by more than BLOWOUT_MARGIN points, else 0.
-    Week 1 (no prior game that season) is always 0."""
+    Week 1 (no prior game that season) is always 0. Has a row for every
+    scheduled game, played or not (see _team_game_margins)."""
     games = _team_game_margins(schedules).sort_values(["team", "season", "week"])
     games["prev_margin"] = games.groupby(["team", "season"])["margin"].shift(1)
     games["blowout_loss_last_game"] = (games["prev_margin"] < -BLOWOUT_MARGIN).astype(int)

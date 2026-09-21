@@ -9,6 +9,7 @@ the season (Section 4.4 / Section 5.6).
 """
 
 import argparse
+import datetime as dt
 import os
 
 import nfl_data_py as nfl
@@ -17,9 +18,10 @@ import requests
 
 from config import CURRENT_SEASON
 from data.fetch_news import fetch_news
+from data.pbp_loader import load_season_pbp
 from model.player_stats import score_props
 from model.predict import score_week
-from model.prediction_log import log_predictions
+from model.prediction_log import game_has_kicked_off, log_predictions
 from report.build_report import build_report
 
 LOG_PATH = os.path.join(os.path.dirname(__file__), "logs", "season_results.csv")
@@ -43,10 +45,33 @@ PROPS_LOG_COLS = [
 ]
 
 
+# Columns that hold mixed text/bool/NA by design (a winner's team code, a
+# True/False verdict, or "not graded yet"). pandas 3 no longer silently upcasts
+# on .loc assignment, and read_csv types an all-empty column float64 (and a
+# fully-graded True/False one bool), so grading a pending row -- assigning "SEA"
+# or pd.NA into either -- raised TypeError and took down the whole run the first
+# time there was a previous week to grade.
+_LOG_MIXED_COLS = ["actual_winner", "correct", "model_beat_market"]
+_LOG_SCORE_COLS = ["actual_away_score", "actual_home_score"]
+_PROPS_MIXED_COLS = ["actual_over", "model_correct", "market_correct", "model_beat_market"]
+
+
+def _coerce_log_dtypes(df: pd.DataFrame, mixed_cols: list[str], float_cols: list[str]) -> pd.DataFrame:
+    for col in mixed_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(object)
+    for col in float_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(float)
+    return df
+
+
 def _load_log() -> pd.DataFrame:
     if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 0:
-        return pd.read_csv(LOG_PATH)
-    return pd.DataFrame(columns=LOG_COLS)
+        df = pd.read_csv(LOG_PATH)
+    else:
+        df = pd.DataFrame(columns=LOG_COLS)
+    return _coerce_log_dtypes(df, _LOG_MIXED_COLS, _LOG_SCORE_COLS)
 
 
 def _grade_pending(log_df: pd.DataFrame) -> pd.DataFrame:
@@ -93,19 +118,53 @@ def _grade_pending(log_df: pd.DataFrame) -> pd.DataFrame:
     return log_df
 
 
-def log_week(predictions: pd.DataFrame, week: int, season: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _write_csv(df: pd.DataFrame, path: str) -> None:
+    """Write via a temp file and rename, so a crash mid-write can never leave a truncated
+    results log behind (these CSVs hold the season's graded history)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def started_game_pairs(predictions: pd.DataFrame, now: dt.datetime | None = None) -> set[tuple[str, str]]:
+    """(home, away) of every game in `predictions` that has already kicked off."""
+    return {(g["home_team"], g["away_team"]) for _, g in predictions.iterrows()
+            if game_has_kicked_off(g.get("gameday"), g.get("gametime"), now, g.get("home_score"))}
+
+
+def started_teams(predictions: pd.DataFrame, now: dt.datetime | None = None) -> set[str]:
+    return {team for pair in started_game_pairs(predictions, now) for team in pair}
+
+
+def log_week(predictions: pd.DataFrame, week: int, season: int,
+             now: dt.datetime | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Returns (full log, newly-graded-this-run subset) -- the second is
     what report/recap.py's weekly recap is built from, never the full
-    season history (that's the Track Record page's job)."""
+    season history (that's the Track Record page's job).
+
+    Only games that haven't kicked off get logged. Re-running a week
+    replaces its rows, but a game that has already started keeps whatever was
+    logged for it before kickoff and gets nothing new -- a row written after the
+    fact would be a hindsight "prediction" graded as if it were a real one."""
+    started = started_game_pairs(predictions, now)
     log_df = _load_log()
     previously_pending_idx = set(log_df.index[log_df["actual_winner"].isna()])
-    log_df = _grade_pending(log_df)
+    try:
+        log_df = _grade_pending(log_df)
+    except Exception as e:
+        # grading fetches final scores; a network hiccup there must not stop this run from
+        # logging its own pre-kickoff predictions -- earlier weeks just stay pending until next run
+        print(f"Warning: couldn't grade earlier weeks this run ({type(e).__name__}: {e}); they stay pending.")
     newly_graded = log_df.loc[sorted(previously_pending_idx & set(log_df.index[log_df["actual_winner"].notna()]))]
 
     rows = []
     for _, game in predictions.iterrows():
         if pd.isna(game.get("home_win_prob")):
             continue  # no prediction made for this game (no team history available)
+        if (game["home_team"], game["away_team"]) in started:
+            print(f"Not logging {game['away_team']} @ {game['home_team']} to the results log: already kicked off.")
+            continue
         home_prob = game["home_win_prob"]
         winner = game["home_team"] if home_prob >= 0.5 else game["away_team"]
         rows.append({
@@ -118,19 +177,27 @@ def log_week(predictions: pd.DataFrame, week: int, season: int) -> tuple[pd.Data
             "correct": pd.NA, "model_beat_market": pd.NA,
         })
 
-    # re-running the same week overwrites its rows instead of duplicating them
-    log_df = log_df[~((log_df["season"] == season) & (log_df["week"] == week))]
+    # Re-running the same week replaces the rows it is re-logging instead of duplicating them.
+    # Nothing else is touched: a game that has already started keeps what was logged before
+    # kickoff, and so does a game this run happened to produce no prediction for (a line pulled,
+    # a team-name mismatch) -- that earlier row was a valid pre-kickoff pick and can't be redone.
+    replaced = {(r["home_team"], r["away_team"]) for r in rows}
+    this_week = (log_df["season"] == season) & (log_df["week"] == week)
+    being_replaced = pd.Series([(h, a) in replaced for h, a in zip(log_df["home_team"], log_df["away_team"])],
+                               index=log_df.index, dtype=bool)
+    log_df = log_df[~(this_week & being_replaced)]
     log_df = pd.concat([log_df, pd.DataFrame(rows, columns=LOG_COLS)], ignore_index=True)
 
-    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-    log_df.to_csv(LOG_PATH, index=False)
+    _write_csv(log_df, LOG_PATH)
     return log_df, newly_graded
 
 
 def _load_props_log() -> pd.DataFrame:
     if os.path.exists(PROPS_LOG_PATH) and os.path.getsize(PROPS_LOG_PATH) > 0:
-        return pd.read_csv(PROPS_LOG_PATH)
-    return pd.DataFrame(columns=PROPS_LOG_COLS)
+        df = pd.read_csv(PROPS_LOG_PATH)
+    else:
+        df = pd.DataFrame(columns=PROPS_LOG_COLS)
+    return _coerce_log_dtypes(df, _PROPS_MIXED_COLS, ["actual_value"])
 
 
 def _actual_stat_value(stat: str, player_id, week: int, qb_log: pd.DataFrame,
@@ -188,7 +255,7 @@ def _grade_pending_props(log_df: pd.DataFrame) -> pd.DataFrame:
         schedule = nfl.import_schedules([season])
         if not (schedule["home_score"].notna()).any():
             continue
-        pbp = nfl.import_pbp_data([season], downcast=True)
+        pbp = load_season_pbp(season)
         pos_map = position_map([season])
         qb_log = qb_passing_game_log(pbp)
         rb_log = rb_rushing_game_log(pbp, pos_map)
@@ -218,17 +285,27 @@ def _grade_pending_props(log_df: pd.DataFrame) -> pd.DataFrame:
     return log_df
 
 
-def log_props_week(props: pd.DataFrame, week: int, season: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+def log_props_week(props: pd.DataFrame, week: int, season: int,
+                   started: set[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Returns (full log, newly-graded-this-run subset) -- see log_week()'s
-    docstring for why the second value matters."""
+    docstring for why the second value matters. `started` is the set of team
+    codes whose game has already kicked off: their props get nothing new logged,
+    and rows already logged for them are kept -- same reasoning as log_week()."""
+    started = started or set()
     log_df = _load_props_log()
     previously_pending_idx = set(log_df.index[log_df["actual_value"].isna()])
-    log_df = _grade_pending_props(log_df)
+    try:
+        log_df = _grade_pending_props(log_df)
+    except Exception as e:
+        # same stance as log_week(): a grading hiccup must not block logging this run's props
+        print(f"Warning: couldn't grade earlier props this run ({type(e).__name__}: {e}); they stay pending.")
     newly_graded = log_df.loc[sorted(previously_pending_idx & set(log_df.index[log_df["actual_value"].notna()]))]
 
     market_backed = props[props["has_line"]] if not props.empty else props
     rows = []
     for _, p in market_backed.iterrows():
+        if p["team"] in started:
+            continue
         rows.append({
             "season": season, "week": week,
             "player": p["player"], "player_id": p["player_id"], "team": p["team"], "opponent": p["opponent"],
@@ -238,12 +315,20 @@ def log_props_week(props: pd.DataFrame, week: int, season: int) -> tuple[pd.Data
             "model_correct": pd.NA, "market_correct": pd.NA, "model_beat_market": pd.NA,
         })
 
-    # re-running the same week overwrites its rows instead of duplicating them
-    log_df = log_df[~((log_df["season"] == season) & (log_df["week"] == week))]
+    # Re-running the same week replaces only the (team, player, stat) rows it is re-logging.
+    # Everything else keeps what was logged: started teams, and any prop this run didn't
+    # produce a market line for (e.g. with the Odds API down every prop has has_line=False,
+    # which used to wipe the week's whole props log) -- those earlier rows were valid
+    # pre-kickoff picks and can't be recreated after the game.
+    replaced = {(r["team"], r["player_id"], r["stat"]) for r in rows}
+    this_week = (log_df["season"] == season) & (log_df["week"] == week)
+    being_replaced = pd.Series([(t, pid, st) in replaced for t, pid, st in
+                                zip(log_df["team"], log_df["player_id"], log_df["stat"])],
+                               index=log_df.index, dtype=bool)
+    log_df = log_df[~(this_week & being_replaced)]
     log_df = pd.concat([log_df, pd.DataFrame(rows, columns=PROPS_LOG_COLS)], ignore_index=True)
 
-    os.makedirs(os.path.dirname(PROPS_LOG_PATH), exist_ok=True)
-    log_df.to_csv(PROPS_LOG_PATH, index=False)
+    _write_csv(log_df, PROPS_LOG_PATH)
     return log_df, newly_graded
 
 
@@ -270,10 +355,13 @@ def run_week(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     except requests.RequestException as e:
         print(f"Warning: couldn't fetch live news ({e}); reporting without it.")
         news = None
-    path = build_report(predictions, week, season, props, news)
+
+    # Grade and log BEFORE building the report: the report's Track Record, Past
+    # Weeks archive and recap read what these steps write, so building it first
+    # (as this used to) left every report one full run behind on results.
     _, newly_graded_games = log_week(predictions, week, season)
     print(f"Logged predictions -> {LOG_PATH}")
-    _, newly_graded_props = log_props_week(props, week, season)
+    _, newly_graded_props = log_props_week(props, week, season, started=started_teams(predictions))
     print(f"Logged props -> {PROPS_LOG_PATH}")
 
     # Week 1 Audit & Tuning Plan Phase 6: a separate, append-only ledger
@@ -284,7 +372,7 @@ def run_week(week: int | None = None, season: int = CURRENT_SEASON) -> str:
 
     _generate_recaps(newly_graded_games, newly_graded_props)
 
-    return path
+    return build_report(predictions, week, season, props, news)
 
 
 def _generate_recaps(newly_graded_games: pd.DataFrame, newly_graded_props: pd.DataFrame) -> None:

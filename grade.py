@@ -23,7 +23,10 @@ import os
 import nfl_data_py as nfl
 import pandas as pd
 
+from data.nfl_net import install_retries
 from model.prediction_log import PREDICTIONS_LOG_PATH
+
+install_retries()
 
 GRADED_LOG_PATH = os.path.join(os.path.dirname(PREDICTIONS_LOG_PATH), "predictions_graded.jsonl")
 
@@ -69,10 +72,23 @@ def grade_one(prediction: dict, home_score: float, away_score: float, graded_at_
     }
 
 
+def logged_before_kickoff(prediction: dict) -> bool:
+    """A snapshot only counts as a prediction if it was written before the game started. An
+    older ledger (or one written by a run that didn't guard against it) can hold a record logged
+    after kickoff -- a hindsight number that must never be graded as if it were a real pick.
+    A record with no kickoff time on file can't be checked, so it stays eligible."""
+    kickoff = prediction.get("kickoff_utc")
+    return kickoff is None or prediction["logged_at_utc"] < kickoff
+
+
 def grade() -> int:
     predictions = _load_jsonl(PREDICTIONS_LOG_PATH)
     if not predictions:
         return 0
+    hindsight = [p for p in predictions if not logged_before_kickoff(p)]
+    if hindsight:
+        print(f"Skipping {len(hindsight)} ledger record(s) logged after their game's kickoff -- not graded.")
+    predictions = [p for p in predictions if logged_before_kickoff(p)]
 
     already_graded = {(g["game_id"], g["logged_at_utc"]) for g in _load_jsonl(GRADED_LOG_PATH)}
     pending = [p for p in predictions if (p["game_id"], p["logged_at_utc"]) not in already_graded]

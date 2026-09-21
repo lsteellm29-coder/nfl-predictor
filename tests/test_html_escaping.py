@@ -23,7 +23,11 @@ PAYLOAD = "<script>alert(1)</script>"
 ESCAPED = "&lt;script&gt;alert(1)&lt;/script&gt;"
 
 
-def test_coach_qb_line_escapes_coach_and_qb_names():
+def test_coach_qb_line_escapes_coach_and_qb_names(monkeypatch):
+    # _coach_qb_line resolves full team names through a lazily-loaded nfl_data_py lookup;
+    # give it the two teams it needs so the test never touches the network.
+    monkeypatch.setattr("report.build_report._TEAM_NAMES_CACHE",
+                        {"NE": "New England Patriots", "SEA": "Seattle Seahawks"})
     game = pd.Series({
         "away_team": "NE", "home_team": "SEA",
         "away_coach": PAYLOAD, "home_coach": "Normal Coach",

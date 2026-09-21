@@ -42,6 +42,17 @@
 # model/player_stats.py's score_props() reads that file, so this step
 # has to run before run_week.py below, same reason it already ran before
 # scoring even prior to this change.
+#
+# Retraining is now guarded (model/train_guard.py). config.HISTORICAL_SEASONS is
+# completed seasons only, so re-fitting every week re-fit identical data -- yet
+# still wrote a new model.joblib (model.calibration re-serializes it
+# unconditionally), so the model_version hash on every logged prediction changed
+# weekly with nothing behind it, and the artifact a set of picks came from was
+# overwritten. The retrain/calibration/TD-model block below now runs only when
+# the training inputs changed (or FORCE_RETRAIN=1), and the deployed model is
+# archived to model/archive/model_<hash>.joblib first. qa.validate_live_stats
+# is a hard-fail gate: the live pre-game stats scoring uses must reproduce the
+# rows the model was trained on. grade.py grades the append-only ledger.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -61,38 +72,53 @@ LOG_FILE="$LOG_DIR/$(date +%Y%m%d_%H%M%S).log"
   echo "=== $(date) : rebuilding team stats ==="
   python -m data.team_stats
 
-  echo "=== $(date) : retraining model ==="
-  python -m model.train
+  echo "=== $(date) : live pre-game stats must reproduce the training rows (hard-fail) ==="
+  python -m qa.validate_live_stats
 
-  echo "=== $(date) : calibration audit ==="
-  python -m model.calibration
+  if python -m model.train_guard check; then
+    echo "=== $(date) : keeping deployed models (nothing they train from has changed) ==="
+  else
+    echo "=== $(date) : archiving the deployed model before it is replaced ==="
+    python -m model.train_guard archive
 
-  echo "=== $(date) : anytime-TD walk-forward backtest ==="
-  python -m model.td_backtest
+    echo "=== $(date) : retraining model ==="
+    python -m model.train
 
-  echo "=== $(date) : retraining anytime-TD ensemble classifier ==="
-  python -m model.td_ensemble
+    echo "=== $(date) : calibration audit ==="
+    python -m model.calibration
 
-  echo "=== $(date) : anytime-TD calibration audit ==="
-  python -m model.td_calibration
+    echo "=== $(date) : anytime-TD walk-forward backtest ==="
+    python -m model.td_backtest
+
+    echo "=== $(date) : retraining anytime-TD ensemble classifier ==="
+    python -m model.td_ensemble
+
+    echo "=== $(date) : anytime-TD calibration audit ==="
+    python -m model.td_calibration
+
+    python -m model.train_guard record
+  fi
 
   echo "=== $(date) : roster validation (hard-fail on stale/empty roster data) ==="
   python -m qa.validate_rosters
 
   echo "=== $(date) : injury-ID coverage check (informational -- never blocks) ==="
-  python -m qa.validate_injury_ids
+  python -m qa.validate_injury_ids || echo "WARNING: injury-ID check failed -- informational, continuing"
 
   echo "=== $(date) : scoring current week + logging ==="
   python run_week.py
 
+  echo "=== $(date) : grading the prediction ledger against final scores ==="
+  python grade.py
+
   echo "=== $(date) : props calibration audit (informational -- reports on prior weeks' graded picks) ==="
-  python -m model.props_calibration
+  python -m model.props_calibration || echo "WARNING: props calibration report failed -- informational, continuing"
 
   echo "=== $(date) : lineup coverage validation (hard-fail only on a team with zero props) ==="
   python -m qa.validate_coverage
 
   echo "=== $(date) : headshot validation (informational -- never blocks) ==="
-  python -m qa.validate_headshots
+  python -m qa.validate_headshots || echo "WARNING: headshot check failed -- informational, continuing"
 
   echo "=== $(date) : publishing artifact ==="
   python build_artifact.py

@@ -22,6 +22,7 @@ patch needed at each of those three call sites.
 """
 
 import os
+import time
 
 import nfl_data_py as nfl
 
@@ -41,18 +42,53 @@ def fetch_pbp(seasons=HISTORICAL_SEASONS):
     return normalize_team_codes(nfl.import_pbp_data(seasons, downcast=True))
 
 
+FETCH_ATTEMPTS = 4
+RETRY_DELAY_SECONDS = 10
+
+
+def _with_retries(fetch, what: str, attempts: int = FETCH_ATTEMPTS, delay: float = RETRY_DELAY_SECONDS,
+                  sleep=time.sleep):
+    """Calls `fetch()`, retrying with a growing delay. Downloading ten seasons of pbp is
+    many separate requests, and one dropped connection used to kill the whole weekly run --
+    nfl_data_py's own handler for it is broken (`except Error` is an undefined name), so it
+    surfaced as an unrelated NameError."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch()
+        except Exception as e:
+            if attempt == attempts:
+                raise
+            wait = delay * attempt
+            print(f"  {what}: attempt {attempt}/{attempts} failed ({type(e).__name__}); retrying in {wait:.0f}s")
+            sleep(wait)
+
+
+def _refresh(what: str, fetch, path: str, **retry_kwargs):
+    """Fetch and cache one table. Completed seasons don't change, so if the refresh fails
+    after its retries and a cache already exists, keep that cache (nothing partial is ever
+    written) and carry on instead of failing the run; with no cache to fall back on it still
+    raises. Returns the fetched frame, or None if the existing cache was kept."""
+    try:
+        df = _with_retries(fetch, what, **retry_kwargs)
+    except Exception as e:
+        if os.path.exists(path):
+            print(f"WARNING: couldn't refresh {what} ({type(e).__name__}); keeping the existing cache at {path}. "
+                  f"Completed seasons don't change, so this is safe.")
+            return None
+        raise
+    df.to_parquet(path)
+    print(f"  saved {len(df)} rows -> {path}")
+    return df
+
+
 def main():
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     print(f"Pulling schedules for {HISTORICAL_SEASONS[0]}-{HISTORICAL_SEASONS[-1]}...")
-    schedules = fetch_schedules()
-    schedules.to_parquet(SCHEDULES_PATH)
-    print(f"  saved {len(schedules)} games -> {SCHEDULES_PATH}")
+    _refresh("schedules", fetch_schedules, SCHEDULES_PATH)
 
     print(f"Pulling play-by-play for {HISTORICAL_SEASONS[0]}-{HISTORICAL_SEASONS[-1]}...")
-    pbp = fetch_pbp()
-    pbp.to_parquet(PBP_PATH)
-    print(f"  saved {len(pbp)} plays -> {PBP_PATH}")
+    _refresh("play-by-play", fetch_pbp, PBP_PATH)
 
 
 if __name__ == "__main__":

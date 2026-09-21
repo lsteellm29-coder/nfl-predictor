@@ -33,7 +33,7 @@ from model.predict import score_week
 from report.about import HOW_IT_WORKS_HTML, HOW_IT_WORKS_STYLE
 from report.alt_lines import ALT_LINES_STYLE
 from report.archive import ARCHIVE_STYLE, archive_html
-from report.build_report import _by_day, _day_header, _model_metrics, _row_data
+from report.build_report import _by_day, _day_header, _model_metrics, _row_data, annotate_results, lines_source_note
 from report.cards import CARDS_SCRIPT, CARDS_STYLE, confidence_tier
 from report.charts import CHARTS_SCRIPT, CHARTS_STYLE
 from report.leaderboard import LEADERBOARD_STYLE, edge_distribution_chart, leaderboard_html
@@ -45,6 +45,7 @@ from report.team_hub import TEAM_HUB_STYLE, team_hubs_html
 from report.theme import DAY_BLOCK, GAME_BLOCK, PRINT_STYLE, THEME_STYLE
 from report.track_record import TRACK_RECORD_STYLE, track_record_html
 from run_week import LOG_PATH, PROPS_LOG_PATH, get_current_week
+from data.live_stats import season_to_date_frames
 from data.team_stats import SCHEDULES_PATH, TEAM_STATS_PATH
 from model.td_ensemble import BACKTEST_PATH
 
@@ -83,7 +84,7 @@ PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SharpLine -- NFL Week {week} Picks</title>
+<title>SharpLine NFL Picks</title>
 <style>
 {theme_style}
 
@@ -262,7 +263,7 @@ PAGE = """<!DOCTYPE html>
   </div>
 
   <footer>
-    Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.
+    Built with nfl_data_py + The Odds API. Some team logos are throwback-era marks sourced from Wikipedia and SportsLogos.net for personal/non-commercial display.{lines_note}
   </footer>
 </div>
 <nav class="bottom-nav">
@@ -331,7 +332,7 @@ def _pick_grid_class_and_label(game) -> tuple[str, str]:
 def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     if week is None:
         week = get_current_week(season)
-    predictions = score_week(week, season)
+    predictions = annotate_results(score_week(week, season))
     props = score_props(week, season)
     n_games = len(predictions)
 
@@ -421,6 +422,11 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
     team_stats_df = pd.read_parquet(TEAM_STATS_PATH) if os.path.exists(TEAM_STATS_PATH) else pd.DataFrame()
     schedules_df = pd.read_parquet(SCHEDULES_PATH) if os.path.exists(SCHEDULES_PATH) else pd.DataFrame()
     td_backtest_df = pd.read_parquet(BACKTEST_PATH) if os.path.exists(BACKTEST_PATH) else pd.DataFrame()
+    # same reason as report/build_report.py's identical block: the cached frames end at last season
+    try:
+        team_stats_df, schedules_df = season_to_date_frames(season, team_stats_df, schedules_df)
+    except Exception as e:
+        print(f"Warning: couldn't add this season's results to the team hubs ({e}); showing cached history only.")
     # Combined Build Plan Part 3 step 3: same data model/predict.py's
     # score_week() already computed for its own narrative/confidence-
     # caveat use, fetched again here rather than threaded through
@@ -464,6 +470,7 @@ def build(week: int | None = None, season: int = CURRENT_SEASON) -> str:
         test_accuracy=f"{metrics['test_accuracy']:.1%}" if metrics["test_accuracy"] else "N/A",
         baseline_accuracy=f"{metrics['baseline_accuracy']:.1%}" if metrics["baseline_accuracy"] else "N/A",
         test_season=metrics["test_season"] or "recent",
+        lines_note=lines_source_note(predictions),
     )
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
